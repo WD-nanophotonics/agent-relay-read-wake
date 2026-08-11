@@ -1,0 +1,19 @@
+[account]
+address = "icywoods.1@gmail.com"
+
+[protocol]
+prefix = "[GMAIL-COURIER]"
+legacy_prefix = "[GC-BRIDGE]"
+
+[[projects]]
+code = "GENERICCHESS"
+aliases = ["GC"]
+root = "C:/Users/icywo/PycharmProjects/GenericChess-chat"
+inbox = "coordination/inbox"
+branch = "chat"
+remote = "origin"
+# remote_url = "https://github.com/your-org/your-repo.git"
+push = true
+legacy_prefixes = ["[GC-BRIDGE]"]
+
+# Add one [[projects]] block per project. Project codes must be unique.
