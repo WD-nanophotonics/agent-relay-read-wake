@@ -48,10 +48,11 @@ class WakeLease:
     completion_token: str = ""
     worker_id: str = ""
     status: LeaseStatus = LeaseStatus.ACTIVE
+    handoff_token: str = ""
 
     @classmethod
     def create(cls, project_id: str, run_id: str, step: int, path: Path, lease_kind: LeaseKind = LeaseKind.WORK, worker_id: str = "") -> "WakeLease":
-        return cls(str(uuid4()), project_id, run_id, step, path.resolve(), utcnow(), lease_kind, secrets.token_urlsafe(32), worker_id)
+        return cls(str(uuid4()), project_id, run_id, step, path.resolve(), utcnow(), lease_kind, secrets.token_urlsafe(32), worker_id, LeaseStatus.ACTIVE, secrets.token_urlsafe(32) if lease_kind is LeaseKind.WORK else "")
 
 
 @dataclass(frozen=True)
@@ -71,13 +72,19 @@ class WakeAdapter(Protocol):
 def wake_instruction(lease: WakeLease) -> str:
     if lease.lease_kind is LeaseKind.DIAGNOSTIC:
         return f"""AGENTRELAY_DIAGNOSTIC_WAKE/1\n\nProject: {lease.project_id}\nLease: {lease.lease_id}\nWorker: {lease.worker_id}\nStaged instruction: {lease.staged_instruction_path}\n\nThis is a no-side-effect diagnostic lease. Do not modify repository files, access Gmail or Chrome, commit, push, create another turn, wait, or retry. Verify the identities above, then execute exactly once:\n{diagnostic_completion_command(lease)}\nAfter the command succeeds, terminate this Codex turn.\n"""
-    return f"""AGENTRELAY_WAKE/1\n\nProject: {lease.project_id}\nRun: {lease.run_id}\nStep: {lease.step:04d}\nLease: {lease.lease_id}\nStaged instruction: {lease.staged_instruction_path}\n\nRead the authoritative staged instruction and execute exactly one work lease. Test, inspect the diff, commit and push applicable changes, then complete the configured ChatGPT handoff before writing a successful completion receipt. Do not poll Gmail, wait for ChatGPT, retry autonomously, or begin another workflow step without a new supervisor wake.\n"""
+    return f"""AGENTRELAY_WAKE/1\n\nProject: {lease.project_id}\nRun: {lease.run_id}\nStep: {lease.step:04d}\nLease: {lease.lease_id}\nWorker: {lease.worker_id}\nStaged instruction: {lease.staged_instruction_path}\nHandoff token: {lease.handoff_token}\n\nRead the authoritative staged instruction and execute exactly one bounded work lease. Do not modify source, access Gmail, start another turn, wait for ChatGPT, or retry. Prepare this exact handoff report for the Supervisor-owned supported browser integration:\nAGENTRELAY PHASE2H HANDOFF CERTIFICATION\nRUN: {lease.run_id}\nSTEP: {lease.step:04d}\nLEASE: {lease.lease_id}\nWORKER: {lease.worker_id}\nHANDOFF_TOKEN: {lease.handoff_token}\nRESULT: WORK_HANDOFF_DIAGNOSTIC\nDo not use unsupported GUI automation. The Supervisor host performs the single fixed-URL browser submission and writes evidence after bounded verification; terminate this turn after preparing the report.\n"""
 
 
 def diagnostic_completion_command(lease: WakeLease) -> str:
     if lease.lease_kind is not LeaseKind.DIAGNOSTIC:
         raise ValueError("completion command requires a diagnostic lease")
     return f"python -m agent_relay.cli complete-diagnostic --lease-id {lease.lease_id} --completion-token {lease.completion_token}"
+
+
+def work_completion_command(lease: WakeLease) -> str:
+    if lease.lease_kind is not LeaseKind.WORK:
+        raise ValueError("completion command requires a work lease")
+    return f"python -m agent_relay.cli complete-work --lease-id {lease.lease_id} --completion-token {lease.completion_token} --handoff-token {lease.handoff_token}"
 
 
 class MockWakeAdapter:

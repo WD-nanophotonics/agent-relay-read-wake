@@ -11,6 +11,7 @@ from uuid import UUID
 
 from .config import RelayConfig
 from .gmail import GmailGateway, GmailMessage
+from .handoff import validate_evidence
 from .protocol import Disposition, ProtocolError, parse_envelope
 from .storage import Ledger, StateStore, atomic_json, now, read_content_hash, stage_instruction
 from .wake import CodexTarget, LeaseKind, LeaseStatus, WakeAdapter, WakeLease, wake_instruction
@@ -170,17 +171,25 @@ class Supervisor:
     def completion_path(self, lease_id: str) -> Path:
         return self.config.local_project_storage / "completions" / f"{lease_id}.json"
 
-    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "", completion_token: str = "", lease_kind: str | None = None) -> Path:
+    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "", completion_token: str = "", lease_kind: str | None = None, handoff_token: str = "") -> Path:
         if outcome not in {"completed", "failed"}:
             raise ValueError("completion outcome must be completed or failed")
         active = self.state.get("active_lease")
         if active and active.get("lease_id") == lease_id:
+            if completion_token and completion_token != str(active.get("completion_token", "")):
+                raise ValueError("completion token does not match active lease")
+            if handoff_token and handoff_token != str(active.get("handoff_token", "")):
+                raise ValueError("handoff token does not match active lease")
             completion_token = completion_token or str(active.get("completion_token", ""))
             lease_kind = lease_kind or str(active.get("lease_kind", LeaseKind.WORK))
         lease_kind = lease_kind or LeaseKind.WORK
         target = self.completion_path(lease_id)
         if outcome == "completed" and lease_kind == LeaseKind.WORK and not handoff_succeeded:
             raise RuntimeError("successful lease completion requires verified ChatGPT handoff")
+        if outcome == "completed" and lease_kind == LeaseKind.WORK:
+            if not active or active.get("lease_id") != lease_id:
+                raise ValueError("successful work completion requires the active lease")
+            validate_evidence(self.config.local_project_storage, active, handoff_token=handoff_token)
         atomic_json(target, {"protocol": "AGENTRELAY_COMPLETION/1", "lease_id": lease_id, "lease_kind": lease_kind, "completion_token": completion_token, "outcome": outcome, "handoff_succeeded": handoff_succeeded, "detail": detail[:500], "recorded_at": now()})
         return target
 
@@ -198,15 +207,17 @@ class Supervisor:
                 raise ValueError("lease ID mismatch")
             if record.get("protocol") != "AGENTRELAY_COMPLETION/1" or record.get("lease_kind") != active.get("lease_kind") or record.get("completion_token") != active.get("completion_token"):
                 raise ValueError("completion receipt identity mismatch")
-            if record.get("outcome") == "completed" and record.get("lease_kind") == LeaseKind.WORK and record.get("handoff_succeeded") is not True:
-                raise ValueError("completion precedes verified handoff")
+            if record.get("outcome") == "completed" and record.get("lease_kind") == LeaseKind.WORK:
+                if record.get("handoff_succeeded") is not True:
+                    raise ValueError("completion precedes verified handoff")
+                validate_evidence(self.config.local_project_storage, active)
             turn_completed = getattr(self.wake_adapter, "turn_completed", None)
             if turn_completed is not None:
                 lease = WakeLease(
                     str(active["lease_id"]), str(active["project_id"]), str(active["run_id"]), int(active["step"]),
                     Path(str(active["staged_instruction_path"])), str(active["created_at"]),
                     LeaseKind(str(active.get("lease_kind", LeaseKind.WORK))), str(active.get("completion_token", "")),
-                    str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))),
+                    str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))), str(active.get("handoff_token", "")),
                 )
                 if not turn_completed(lease):
                     detail = getattr(self.wake_adapter, "last_error", None)

@@ -6,8 +6,9 @@ import tempfile
 
 import pytest
 
-from agent_relay.config import RelayConfig
+from agent_relay.config import EXPECTED_CHAT_URL, RelayConfig
 from agent_relay.gmail import Attachment, GmailMessage
+from agent_relay.handoff import write_evidence
 from agent_relay.protocol import Disposition, ProtocolError, parse_envelope
 from agent_relay.supervisor import Supervisor, SupervisorState, write_completion_receipt
 from agent_relay.wake import LeaseKind, MockWakeAdapter, WakeResult
@@ -104,7 +105,8 @@ def test_real_wake_acceptance_keeps_lease_running_until_completion_record(tmp_pa
     assert relay.process_message_id("m1") == "wake-accepted"
     active = relay.snapshot()["active_lease"]
     assert relay.snapshot()["state"] == SupervisorState.AGENT_RUNNING and active["process_id"] == 1234
-    relay.write_completion_record(active["lease_id"], handoff_succeeded=True)
+    write_evidence(config(tmp_path).local_project_storage, lease_id=active["lease_id"], worker_id=active["worker_id"], handoff_token=active["handoff_token"], chat_url=EXPECTED_CHAT_URL)
+    relay.write_completion_record(active["lease_id"], handoff_succeeded=True, completion_token=active["completion_token"], handoff_token=active["handoff_token"])
     assert relay.consume_completion_record()
     assert relay.snapshot()["state"] == SupervisorState.WAITING_FOR_REPLY and relay.snapshot()["active_lease"] is None
 
@@ -150,7 +152,8 @@ def test_diagnostic_wrong_token_and_kind_fail_closed(tmp_path):
         def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False)
     relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start(); relay.process_message_id("m1", LeaseKind.DIAGNOSTIC)
     active = relay.snapshot()["active_lease"]
-    relay.write_completion_record(active["lease_id"], completion_token="wrong", lease_kind="DIAGNOSTIC")
+    with pytest.raises(ValueError, match="completion token"):
+        relay.write_completion_record(active["lease_id"], completion_token="wrong", lease_kind="DIAGNOSTIC")
     assert not relay.consume_completion_record() and relay.snapshot()["active_lease"] is not None
     relay2 = Supervisor(config(tmp_path / "kind"), FakeGmail([message()]), Realish()); relay2.start(); relay2.process_message_id("m1", LeaseKind.DIAGNOSTIC)
     active2 = relay2.snapshot()["active_lease"]

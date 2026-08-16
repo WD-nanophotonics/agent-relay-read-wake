@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import app_home, config_path, load_config, save_binding, write_example
 from .gmail import GoogleGmailGateway
+from .handoff import write_evidence
 from .supervisor import Supervisor, write_completion_receipt
 from .ui import RelayApp
 from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
@@ -12,7 +13,7 @@ from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, M
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "ui", "complete", "complete-diagnostic", "bind"), nargs="?", default="ui")
+    parser.add_argument("command", choices=("init", "ui", "complete", "complete-diagnostic", "complete-work", "record-handoff", "bind"), nargs="?", default="ui")
     parser.add_argument("--lease-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
@@ -20,6 +21,10 @@ def main(argv=None) -> int:
     parser.add_argument("--handoff-succeeded", action="store_true")
     parser.add_argument("--dev-session-id")
     parser.add_argument("--completion-token")
+    parser.add_argument("--handoff-token")
+    parser.add_argument("--worker-id")
+    parser.add_argument("--navigation-attempts", type=int, default=1)
+    parser.add_argument("--verification-attempts", type=int, default=1)
     args = parser.parse_args(argv)
     home = app_home()
     if args.command == "init":
@@ -41,6 +46,19 @@ def main(argv=None) -> int:
         print(f"DIAGNOSTIC_COMPLETION_RECORDED {path}")
         return 0
     config = load_config(home)
+    if args.command == "record-handoff":
+        if not args.lease_id or not args.handoff_token or not args.worker_id:
+            parser.error("record-handoff requires --lease-id, --worker-id, and --handoff-token")
+        path = write_evidence(config.local_project_storage, lease_id=args.lease_id, worker_id=args.worker_id, handoff_token=args.handoff_token, chat_url=args.chat_url or config.chat_url, navigation_attempts=args.navigation_attempts, verification_attempts=args.verification_attempts)
+        print(f"HANDOFF_EVIDENCE_RECORDED {path}")
+        return 0
+    if args.command == "complete-work":
+        if not args.lease_id or not args.completion_token or not args.handoff_token:
+            parser.error("complete-work requires --lease-id, --completion-token, and --handoff-token")
+        relay = Supervisor(config, None, MockWakeAdapter())
+        path = relay.write_completion_record(args.lease_id, handoff_succeeded=True, completion_token=args.completion_token, lease_kind="WORK", handoff_token=args.handoff_token)
+        print(f"WORK_COMPLETION_RECORDED {path}")
+        return 0
     if args.command == "complete":
         if not args.lease_id:
             parser.error("complete requires --lease-id")
