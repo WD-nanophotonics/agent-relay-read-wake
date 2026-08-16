@@ -117,7 +117,7 @@ def test_restart_with_inflight_lease_fails_closed(tmp_path):
         def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False)
     relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start()
     assert relay.process_message_id("m1") == "wake-accepted"
-    restored = Supervisor(config(tmp_path), FakeGmail(), Realish())
+    restored = Supervisor(config(tmp_path), FakeGmail(), Realish(), startup_recovery=True)
     assert restored.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED
     assert restored.fail_active_lease("worker outcome unavailable")
     assert restored.snapshot()["active_lease"] is None and restored.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED

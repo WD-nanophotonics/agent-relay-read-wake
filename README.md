@@ -1,4 +1,4 @@
-# AgentRelay Read & Wake Supervisor (Phase 1 / Phase 3A)
+# AgentRelay Read & Wake Supervisor (Phase 1 / Phase 3A / Phase 2J)
 
 This repository contains two deliberately separate local tools:
 
@@ -109,6 +109,26 @@ silently abandoned, and the runner reports `ACTIVE_LEASE` until its audited
 outcome. Gmail polling follows the configured interval while heartbeats remain
 observable. Phase 3A does not expand Chrome automation or author the next Gmail
 task; the fixed ChatGPT handoff remains an explicit external contract.
+
+## Phase 2J completion-path recovery
+
+The production runner checks for a deterministic completion receipt while a
+lease is `AGENT_RUNNING`, before polling Gmail again. `complete-work` and
+`complete-diagnostic` are pure receipt writers: they validate the exact
+persisted lease and never construct a state-mutating Supervisor. Ordinary
+Supervisor construction is read-only; only the production runner opts into
+startup recovery policy.
+
+App Server terminal events are retained by exact `(thread_id, turn_id)` and
+consumed only by the matching lease. After a verified WORK handoff, the
+Supervisor may issue one bounded `turn/interrupt` for the exact owned turn;
+the real terminal event is still required and no completion event is
+fabricated. A cleanup interrupt does not undo logical WORK completion.
+
+If the local test runner is unstable on Windows, use compileall and the
+standalone deterministic checks first; pytest remains the intended project
+gate when the host is healthy. Runtime files and credentials remain outside
+the repository under `%LOCALAPPDATA%\\AgentRelay`.
 
 ---
 

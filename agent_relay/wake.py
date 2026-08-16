@@ -6,6 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 import secrets
 import subprocess
+import time
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -49,6 +50,7 @@ class WakeLease:
     worker_id: str = ""
     status: LeaseStatus = LeaseStatus.ACTIVE
     handoff_token: str = ""
+    turn_id: str = ""
 
     @classmethod
     def create(cls, project_id: str, run_id: str, step: int, path: Path, lease_kind: LeaseKind = LeaseKind.WORK, worker_id: str = "") -> "WakeLease":
@@ -150,6 +152,9 @@ class CodexAppServerWakeAdapter:
         self.last_turn_id: str | None = None
         self.last_turn_status: str | None = None
         self.last_error: str | None = None
+        self.last_turn_started_at: float | None = None
+        self.interrupt_grace_seconds = 5.0
+        self.interrupt_attempts: set[tuple[str, str]] = set()
 
     def start_backend(self) -> WakeResult:
         if self.target.target_type != "codex-app-server":
@@ -249,6 +254,7 @@ class CodexAppServerWakeAdapter:
             turn = self.controller.start_turn(self.worker_id, instruction, [self.target.repo_path, self.local_project_storage])
             self.last_turn_id = turn.turn_id
             self.last_turn_status = turn.status
+            self.last_turn_started_at = time.monotonic()
             self.worker_status = "active"
             return WakeResult(True, "App Server turn started", process_id=self.controller.pid, turn_id=turn.turn_id)
         except Exception as exc:
@@ -256,17 +262,50 @@ class CodexAppServerWakeAdapter:
             return WakeResult(False, f"App Server turn start failed: {exc}")
 
     def turn_completed(self, lease: WakeLease) -> bool:
-        if not self.controller or not self.last_turn_id or lease.worker_id != self.worker_id:
+        turn_id = str(lease.turn_id or self.last_turn_id or "")
+        if not self.controller or not turn_id or lease.worker_id != self.worker_id:
             return False
         try:
-            for event in self.controller.poll_notifications():
-                if event.get("method") == "turn/completed":
-                    params = event.get("params", {})
-                    turn = params.get("turn", {})
-                    if params.get("threadId") == self.worker_id and turn.get("id") == self.last_turn_id:
-                        self.last_turn_status = str(turn.get("status", "completed"))
-                        self.worker_status = "idle"
+            event = self.controller.consume_terminal_event(self.worker_id, turn_id) if hasattr(self.controller, "consume_terminal_event") else None
+            if event is None:
+                for candidate in self.controller.poll_notifications():
+                    if candidate.get("method") == "turn/completed":
+                        params = candidate.get("params", {})
+                        turn = params.get("turn", {})
+                        if params.get("threadId") == self.worker_id and turn.get("id") == turn_id:
+                            event = candidate
+                            break
+            if event is not None:
+                params = event.get("params", {})
+                turn = params.get("turn", {})
+                if params.get("threadId") == self.worker_id and turn.get("id") == turn_id:
+                    self.last_turn_id = turn_id
+                    self.last_turn_status = str(turn.get("status", "completed"))
+                    self.worker_status = "idle"
             return self.last_turn_status in {"completed", "interrupted", "failed"} and self.worker_status == "idle"
+        except AppServerError as exc:
+            self.last_error = str(exc)
+            return False
+
+    def interrupt_turn_once(self, lease: WakeLease) -> bool:
+        """Request bounded cleanup for one exact post-handoff turn at most once."""
+        if not self.controller or lease.worker_id != self.worker_id or not lease.turn_id:
+            return False
+        key = (self.worker_id, str(lease.turn_id))
+        if key in self.interrupt_attempts:
+            return False
+        started = self.last_turn_started_at
+        if started is None:
+            started = time.monotonic() - self.interrupt_grace_seconds
+        if time.monotonic() - started < self.interrupt_grace_seconds:
+            return False
+        try:
+            if hasattr(self.controller, "has_terminal_event") and self.controller.has_terminal_event(self.worker_id, str(lease.turn_id)):
+                return False
+            self.controller.interrupt_turn(self.worker_id, str(lease.turn_id))
+            self.interrupt_attempts.add(key)
+            self.last_error = "post-handoff turn interrupt requested"
+            return True
         except AppServerError as exc:
             self.last_error = str(exc)
             return False

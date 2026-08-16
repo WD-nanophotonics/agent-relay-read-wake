@@ -1,4 +1,4 @@
-# AgentRelay architecture note (Phase 1 / Phase 3A)
+# AgentRelay architecture note (Phase 1 / Phase 3A / Phase 2J)
 
 ## Why software waits
 
@@ -37,6 +37,22 @@ stdout/stderr to the project runtime log. `start-background` is idempotent,
 `status` is read-only, and `stop-background` is bounded. The existing
 foreground `run` command remains available for diagnostics. AI never waits,
 and no model or Chrome automation is invoked by status or lifecycle commands.
+
+## Phase 2J completion and recovery path
+
+While `AGENT_RUNNING`, `Supervisor.poll_once()` consumes the exact local
+completion receipt before it performs any Gmail download. Completion helpers
+are pure writers that validate the persisted lease, kind, and tokens; they do
+not instantiate or mutate a Supervisor. Constructor reads are side-effect
+free, while the production runner alone opts into explicit startup recovery.
+
+The App Server controller retains `turn/completed` notifications by exact
+`(thread_id, turn_id)`. A lease can close only after its matching terminal
+event and completion receipt are present. Following a verified WORK handoff,
+one exact `turn/interrupt` may be sent after a bounded grace period; the
+controller then waits for the real terminal event and never fabricates one.
+The interrupt is cleanup of a logically completed WORK lease, not a second
+work attempt.
 
 ## Future integration points
 

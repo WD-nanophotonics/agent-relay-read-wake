@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import ctypes
 from threading import Event, Thread
 import uuid
 
@@ -114,7 +115,22 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, PermissionError, SystemError):
+    except SystemError:
+        # On some Windows/Python combinations os.kill(pid, 0) raises a
+        # SystemError even for a live process. Query the process handle
+        # directly before declaring an owned runner stale.
+        if os.name != "nt":
+            return False
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+        except (AttributeError, OSError):
+            pass
+        return False
+    except (OSError, PermissionError):
         return False
 
 
@@ -168,7 +184,7 @@ class BackgroundRunner:
         if not self.owner.acquire():
             return 2
         try:
-            self.relay = Supervisor(self.config, self.gateway, self.adapter)
+            self.relay = Supervisor(self.config, self.gateway, self.adapter, startup_recovery=True)
             self.relay.start()
             self.owner.update(state="RUNNING", supervisor_state=self.relay.snapshot().get("state"), backend_pid=getattr(getattr(self.adapter, "controller", None), "pid", None), worker_id=getattr(self.adapter, "worker_id", ""), worker_status=getattr(self.adapter, "worker_status", "unknown"))
             last_poll = 0.0

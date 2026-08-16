@@ -7,7 +7,7 @@ import time
 from .config import app_home, config_path, load_config, save_binding, write_example
 from .gmail import GoogleGmailGateway
 from .handoff import write_evidence
-from .supervisor import Supervisor, write_completion_receipt
+from .supervisor import Supervisor, write_completion_receipt, write_work_completion_receipt
 from .runner import BackgroundRunner, runner_status, start_background, stop_background
 from .ui import RelayApp
 from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
@@ -72,8 +72,7 @@ def main(argv=None) -> int:
     if args.command == "complete-work":
         if not args.lease_id or not args.completion_token or not args.handoff_token:
             parser.error("complete-work requires --lease-id, --completion-token, and --handoff-token")
-        relay = Supervisor(config, None, MockWakeAdapter())
-        path = relay.write_completion_record(args.lease_id, handoff_succeeded=True, completion_token=args.completion_token, lease_kind="WORK", handoff_token=args.handoff_token)
+        path = write_work_completion_receipt(config.local_project_storage, args.lease_id, args.completion_token, args.handoff_token)
         print(f"WORK_COMPLETION_RECORDED {path}")
         return 0
     if args.command == "run":

@@ -53,6 +53,7 @@ class AppServerController:
         self.last_error: str | None = None
         self.last_turn_id: str | None = None
         self.notification_events: list[dict[str, Any]] = []
+        self.terminal_events: dict[tuple[str, str], dict[str, Any]] = {}
 
     @property
     def pid(self) -> int | None:
@@ -194,7 +195,14 @@ class AppServerController:
 
     def _handle_server_message(self, message: dict[str, Any]) -> None:
         if message.get("method") and "id" not in message:
-            self.notification_events.append(message)
+            if message.get("method") == "turn/completed":
+                params = message.get("params", {})
+                turn = params.get("turn", {})
+                thread_id, turn_id = params.get("threadId"), turn.get("id")
+                if thread_id and turn_id:
+                    self.terminal_events[(str(thread_id), str(turn_id))] = message
+            else:
+                self.notification_events.append(message)
         elif message.get("method") and "id" in message:
             # AgentRelay never grants interactive approval or user input.
             try:
@@ -219,6 +227,20 @@ class AppServerController:
         events.extend(self.notification_events)
         self.notification_events = []
         return events
+
+    def consume_terminal_event(self, thread_id: str, turn_id: str) -> dict[str, Any] | None:
+        """Drain transport messages, then consume only the exact terminal event."""
+        self.poll_notifications()
+        return self.terminal_events.pop((str(thread_id), str(turn_id)), None)
+
+    def has_terminal_event(self, thread_id: str, turn_id: str) -> bool:
+        """Drain transport messages without consuming the exact terminal event."""
+        self.poll_notifications()
+        return (str(thread_id), str(turn_id)) in self.terminal_events
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]:
+        """Request bounded cleanup for one exact turn on this owned connection."""
+        return self.request("turn/interrupt", {"threadId": str(thread_id), "turnId": str(turn_id)})
 
     def list_threads(self, cwd: Path | None = None) -> list[AppServerThread]:
         params: dict[str, Any] = {"limit": 100, "useStateDbOnly": True, "sourceKinds": ["appServer"]}

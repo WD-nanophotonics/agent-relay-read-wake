@@ -30,19 +30,20 @@ class SupervisorState(StrEnum):
 
 
 class Supervisor:
-    def __init__(self, config: RelayConfig, gateway: GmailGateway, wake_adapter: WakeAdapter):
+    def __init__(self, config: RelayConfig, gateway: GmailGateway, wake_adapter: WakeAdapter, *, startup_recovery: bool = False):
         self.config, self.gateway, self.wake_adapter = config, gateway, wake_adapter
         self.store = StateStore(config.local_project_storage)
         self.ledger = Ledger(config.local_project_storage)
         self.stop_event = Event()
         self.lock = RLock()
         self.state = self.store.load()
-        if self.state.get("active_lease"):
-            self.state["state"] = SupervisorState.HUMAN_REQUIRED
-            self.state["last_error"] = "RECOVERY_REQUIRED: persisted lease outcome is unknown"
-        else:
-            self.state["state"] = SupervisorState.STOPPED
-        self.store.save(self.state)
+        if startup_recovery:
+            if self.state.get("active_lease"):
+                self.state["state"] = SupervisorState.HUMAN_REQUIRED
+                self.state["last_error"] = "RECOVERY_REQUIRED: persisted lease outcome is unknown"
+            else:
+                self.state["state"] = SupervisorState.STOPPED
+            self.store.save(self.state)
 
     @property
     def target(self) -> CodexTarget:
@@ -154,9 +155,14 @@ class Supervisor:
 
     def poll_once(self) -> None:
         with self.lock:
-            if self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY) or self.stop_event.is_set():
+            if self.stop_event.is_set():
                 return
-            self.consume_completion_record()
+            if self.state["state"] == SupervisorState.AGENT_RUNNING:
+                self.consume_completion_record()
+                if self.state["state"] == SupervisorState.AGENT_RUNNING:
+                    return
+            if self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY):
+                return
         try:
             ids = self.gateway.list_messages()
             self.ledger.append("GMAIL_POLLED", project_id=self.config.project_id, count=len(ids))
@@ -217,13 +223,18 @@ class Supervisor:
                     str(active["lease_id"]), str(active["project_id"]), str(active["run_id"]), int(active["step"]),
                     Path(str(active["staged_instruction_path"])), str(active["created_at"]),
                     LeaseKind(str(active.get("lease_kind", LeaseKind.WORK))), str(active.get("completion_token", "")),
-                    str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))), str(active.get("handoff_token", "")),
+                    str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))), str(active.get("handoff_token", "")), str(active.get("turn_id", "")),
                 )
                 if not turn_completed(lease):
-                    detail = getattr(self.wake_adapter, "last_error", None)
-                    if detail:
-                        self._human_required("app-server-lifecycle-failed", lease_id=active["lease_id"], detail=detail)
-                    return False
+                    interrupt_once = getattr(self.wake_adapter, "interrupt_turn_once", None)
+                    if interrupt_once is not None and interrupt_once(lease):
+                        if not turn_completed(lease):
+                            return False
+                    else:
+                        detail = getattr(self.wake_adapter, "last_error", None)
+                        if detail:
+                            self._human_required("app-server-lifecycle-failed", lease_id=active["lease_id"], detail=detail)
+                        return False
             self.complete_lease(active["lease_id"], record.get("outcome", "failed"))
             return True
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -347,6 +358,49 @@ def write_completion_receipt(project_storage: Path, lease_id: str, completion_to
         UUID(lease_id)
     except (ValueError, AttributeError, TypeError) as exc:
         raise ValueError("lease_id must be a UUID") from exc
+    active = StateStore(project_storage).load().get("active_lease")
+    if not active or active.get("lease_id") != lease_id:
+        raise ValueError("completion lease does not match the exact active lease")
+    if active.get("lease_kind") != LeaseKind.DIAGNOSTIC.value:
+        raise ValueError("completion kind does not match the exact active lease")
+    if str(active.get("completion_token", "")) != completion_token:
+        raise ValueError("completion token does not match the exact active lease")
     target = project_storage / "completions" / f"{lease_id}.json"
     atomic_json(target, {"protocol": "AGENTRELAY_COMPLETION/1", "lease_id": lease_id, "lease_kind": lease_kind, "completion_token": completion_token, "outcome": "completed", "handoff_succeeded": False, "recorded_at": now()})
+    return target
+
+
+def write_work_completion_receipt(
+    project_storage: Path,
+    lease_id: str,
+    completion_token: str,
+    handoff_token: str,
+    *,
+    outcome: str = "completed",
+    detail: str = "",
+) -> Path:
+    """Write a WORK receipt without constructing or mutating a Supervisor."""
+    if outcome not in {"completed", "failed"}:
+        raise ValueError("completion outcome must be completed or failed")
+    state = StateStore(project_storage).load()
+    active = state.get("active_lease")
+    if not active or active.get("lease_id") != lease_id:
+        raise ValueError("completion lease does not match the exact active lease")
+    if str(active.get("completion_token", "")) != completion_token:
+        raise ValueError("completion token does not match the exact active lease")
+    if str(active.get("handoff_token", "")) != handoff_token:
+        raise ValueError("handoff token does not match the exact active lease")
+    if outcome == "completed":
+        validate_evidence(project_storage, active, handoff_token=handoff_token)
+    target = project_storage / "completions" / f"{lease_id}.json"
+    atomic_json(target, {
+        "protocol": "AGENTRELAY_COMPLETION/1",
+        "lease_id": lease_id,
+        "lease_kind": "WORK",
+        "completion_token": completion_token,
+        "outcome": outcome,
+        "handoff_succeeded": outcome == "completed",
+        "detail": detail[:500],
+        "recorded_at": now(),
+    })
     return target
