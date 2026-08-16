@@ -66,6 +66,9 @@ class Supervisor:
                 raise RuntimeError("project is disabled")
             if self.state.get("active_lease"):
                 raise RuntimeError("RECOVERY_REQUIRED: resolve the persisted active lease before monitoring")
+            if self.config.dev_session_id and self.config.dev_session_id == self.config.target_id:
+                self._human_required("self-recursion-target")
+                raise RuntimeError("wake target is the active development session")
             validation = self.wake_adapter.validate_target(self.target)
             if not validation.accepted:
                 self._human_required("target-validation-failed", detail=validation.detail)

@@ -30,6 +30,7 @@ class RelayConfig:
     enabled: bool
     gmail_auth_home: Path
     codex_command: str = "codex.cmd"
+    dev_session_id: str = ""
 
 
 def config_path(home: Path | None = None) -> Path:
@@ -59,16 +60,16 @@ def load_config(home: Path | None = None) -> RelayConfig:
         raise ValueError("target_type must be mock or codex-cli")
     if target_type == "codex-cli" and str(raw["chat_url"]) != EXPECTED_CHAT_URL:
         raise ValueError("chat_url must be the configured fixed ChatGPT conversation")
-    return RelayConfig(project_id, str(raw["display_name"]), str(raw["channel_id"]), expand(raw["repo_path"]), expand(raw["local_project_storage"]), target_type, str(raw.get("target_id", "")), str(raw["target_label"]), str(raw["chat_url"]), interval, bool(raw.get("enabled", True)), expand(raw["gmail_auth_home"]), str(raw.get("codex_command", "codex.cmd")))
+    return RelayConfig(project_id, str(raw["display_name"]), str(raw["channel_id"]), expand(raw["repo_path"]), expand(raw["local_project_storage"]), target_type, str(raw.get("target_id", "")), str(raw["target_label"]), str(raw["chat_url"]), interval, bool(raw.get("enabled", True)), expand(raw["gmail_auth_home"]), str(raw.get("codex_command", "codex.cmd")), str(raw.get("dev_session_id", "")))
 
 
-def save_binding(home: Path, *, target_id: str, target_type: str = "codex-cli", chat_url: str = EXPECTED_CHAT_URL) -> Path:
+def save_binding(home: Path, *, target_id: str, target_type: str = "codex-cli", chat_url: str = EXPECTED_CHAT_URL, dev_session_id: str = "") -> Path:
     target = config_path(home)
     target.parent.mkdir(parents=True, exist_ok=True)
     repo = Path.cwd().resolve()
     storage = app_home() / "projects" / "gmail-courier"
     from gmail_courier.config import home_dir
-    target.write_text("[project]\n" + f'project_id = "gmail-courier"\n' + 'display_name = "Gmail Courier"\n' + 'channel_id = "AR-GMAILCOURIER-A1R7P"\n' + f'repo_path = "{repo.as_posix()}"\n' + f'local_project_storage = "{storage.as_posix()}"\n' + f'target_type = "{target_type}"\n' + f'target_id = "{target_id}"\n' + 'target_label = "Gmail Courier bound Codex session"\n' + f'chat_url = "{chat_url}"\n' + 'poll_interval = 20\nenabled = true\n' + f'gmail_auth_home = "{home_dir().as_posix()}"\n' + 'codex_command = "codex.cmd"\n', encoding="utf-8")
+    target.write_text("[project]\n" + f'project_id = "gmail-courier"\n' + 'display_name = "Gmail Courier"\n' + 'channel_id = "AR-GMAILCOURIER-A1R7P"\n' + f'repo_path = "{repo.as_posix()}"\n' + f'local_project_storage = "{storage.as_posix()}"\n' + f'target_type = "{target_type}"\n' + f'target_id = "{target_id}"\n' + f'dev_session_id = "{dev_session_id}"\n' + 'target_label = "AgentRelay Dedicated Worker"\n' + f'chat_url = "{chat_url}"\n' + 'poll_interval = 20\nenabled = true\n' + f'gmail_auth_home = "{home_dir().as_posix()}"\n' + 'codex_command = "codex.cmd"\n', encoding="utf-8")
     return target
 
 

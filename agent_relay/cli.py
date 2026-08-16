@@ -18,6 +18,7 @@ def main(argv=None) -> int:
     parser.add_argument("--target-type", default="codex-cli")
     parser.add_argument("--chat-url")
     parser.add_argument("--handoff-succeeded", action="store_true")
+    parser.add_argument("--dev-session-id")
     args = parser.parse_args(argv)
     home = app_home()
     if args.command == "init":
@@ -29,7 +30,7 @@ def main(argv=None) -> int:
     if args.command == "bind":
         if not args.target_id:
             parser.error("bind requires --target-id")
-        print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type, chat_url=args.chat_url or 'https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9')}")
+        print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type, chat_url=args.chat_url or 'https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9', dev_session_id=args.dev_session_id or '')}")
         return 0
     config = load_config(home)
     if args.command == "complete":

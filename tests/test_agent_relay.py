@@ -128,6 +128,16 @@ def test_completion_requires_handoff_evidence(tmp_path):
         relay.write_completion_record(relay.snapshot()["active_lease"]["lease_id"])
 
 
+def test_self_recursion_target_is_rejected(tmp_path):
+    class Realish:
+        def validate_target(self, _target): return WakeResult(True, "bound")
+        def wake(self, _lease, _instruction): return WakeResult(True, "accepted")
+    cfg = replace(config(tmp_path), target_type="codex-cli", target_id="same", dev_session_id="same")
+    relay = Supervisor(cfg, FakeGmail(), Realish())
+    with pytest.raises(RuntimeError, match="development session"):
+        relay.start()
+
+
 def test_malformed_state_and_project_isolation(tmp_path):
     first = config(tmp_path)
     first.local_project_storage.mkdir(parents=True)
