@@ -37,7 +37,7 @@ class FakeController:
 
     def start(self): self.initialized = True; return {"pid": self.pid}
     def stop(self): self.stopped = True; self.initialized = False
-    def find_worker(self, worker_id=None): return AppServerThread(worker_id or self.worker_id, "idle", {})
+    def find_worker(self, worker_id=None): return AppServerThread(worker_id or self.worker_id, "idle", {"threadSource": "appServer"}, "appServer", "")
     def start_worker(self):
         self.worker_id = "owned-worker"
         return AppServerThread(self.worker_id, "idle", {})

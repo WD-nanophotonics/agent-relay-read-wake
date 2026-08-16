@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import time
 
 from .config import app_home, config_path, load_config, save_binding, write_example
 from .gmail import GoogleGmailGateway
@@ -13,7 +14,7 @@ from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, M
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "ui", "complete", "complete-diagnostic", "complete-work", "record-handoff", "bind"), nargs="?", default="ui")
+    parser.add_argument("command", choices=("init", "ui", "run", "complete", "complete-diagnostic", "complete-work", "record-handoff", "bind"), nargs="?", default="ui")
     parser.add_argument("--lease-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
@@ -58,6 +59,24 @@ def main(argv=None) -> int:
         relay = Supervisor(config, None, MockWakeAdapter())
         path = relay.write_completion_record(args.lease_id, handoff_succeeded=True, completion_token=args.completion_token, lease_kind="WORK", handoff_token=args.handoff_token)
         print(f"WORK_COMPLETION_RECORDED {path}")
+        return 0
+    if args.command == "run":
+        target = CodexTarget(config.target_type, config.target_id, config.target_label, config.repo_path)
+        if config.target_type == "mock":
+            adapter = MockWakeAdapter()
+        elif config.target_type == "codex-app-server":
+            adapter = CodexAppServerWakeAdapter(target, config.local_project_storage / "logs", config.codex_command, config.local_project_storage, config.dev_session_id)
+        else:
+            adapter = CodexCliWakeAdapter(target, config.local_project_storage / "logs", config.codex_command)
+        relay = Supervisor(config, GoogleGmailGateway(config.gmail_auth_home), adapter)
+        relay.start()
+        print("AGENT_RELAY_RUNNING", flush=True)
+        try:
+            while True:
+                relay.poll_once()
+                time.sleep(config.poll_interval)
+        except KeyboardInterrupt:
+            relay.stop()
         return 0
     if args.command == "complete":
         if not args.lease_id:

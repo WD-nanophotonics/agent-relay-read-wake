@@ -11,6 +11,51 @@ from .storage import atomic_json, now
 PROTOCOL = "AGENTRELAY_HANDOFF/1"
 
 
+def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str) -> str:
+    """Build the deterministic Phase 2I return-path message."""
+    return "\n".join([
+        "AGENTRELAY_CHATGPT_HANDOFF/1",
+        "",
+        f"CHANNEL: {channel_id}",
+        f"RUN: {run_id}",
+        f"STEP: {step:04d}",
+        f"PROJECT: {project_id}",
+        "",
+        f"LEASE: {lease_id}",
+        f"WORKER: {worker_id}",
+        f"HANDOFF_TOKEN: {handoff_token}",
+        "",
+        f"REPOSITORY: {repository}",
+        f"BRANCH: {branch}",
+        f"BASELINE_SHA: {baseline_sha}",
+        f"REMOTE_HEAD: {remote_head}",
+        "",
+        "STATUS: WORK_COMPLETED",
+        f"TESTS: {tests}",
+        f"SUMMARY: {summary}",
+        f"BLOCKERS: {blockers}",
+        f"SUGGESTED_NEXT_BOUNDARY: {next_boundary}",
+        "",
+        "ACTION_REQUIRED: AUDIT_REMOTE_AND_SEND_NEXT_GMAIL",
+        "NEXT_STEP: 0010",
+        "NEXT_PARENT: 0009",
+        "",
+        "CHATGPT MUST:",
+        "1. Audit the remote GitHub result before deciding the next task.",
+        "2. Decide the next bounded task from the audited repository state.",
+        "3. Generate the authoritative next AgentRelay instruction.",
+        "4. SEND it immediately through Gmail in this same ChatGPT turn.",
+        "5. Use the same CHANNEL / RUN / PROJECT.",
+        "6. Use STEP = NEXT_STEP and PARENT = NEXT_PARENT exactly.",
+        "7. Use DISPOSITION: WAKE when work should continue.",
+        "8. Use DISPOSITION: HUMAN_REQUIRED if audit shows the loop must stop for human intervention.",
+        "9. Do not merely draft the email.",
+        "10. Do not ask the user to copy or forward anything.",
+        "11. Do not wait for another user message before sending Gmail.",
+        "12. After sending Gmail, end the ChatGPT turn. Do not wait for Codex.",
+    ])
+
+
 def evidence_path(project_storage: Path, lease_id: str) -> Path:
     return project_storage / "handoffs" / f"{lease_id}.json"
 
