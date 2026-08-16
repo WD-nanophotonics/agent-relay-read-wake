@@ -165,7 +165,13 @@ class CodexAppServerWakeAdapter:
                     observed = self.controller.read_worker(self.worker_id)
                 except AppServerError:
                     observed = None
-            if observed and observed.status in {"idle"}:
+            if observed and observed.source_kind != "appServer":
+                self.superseded_worker_id = self.worker_id
+                created = self.controller.start_worker()
+                observed = created
+                self.worker_id = created.thread_id
+                self.worker_status = created.status
+            elif observed and observed.status in {"idle"}:
                 self.worker_status = observed.status
             elif observed and observed.status == "notLoaded":
                 try:
@@ -176,15 +182,18 @@ class CodexAppServerWakeAdapter:
                         raise
                     self.superseded_worker_id = self.worker_id
                     created = self.controller.start_worker()
+                    observed = created
                     self.worker_id = created.thread_id
                     self.worker_status = created.status
             elif observed and observed.status in {"active", "systemError"}:
                 self.superseded_worker_id = self.worker_id
                 created = self.controller.start_worker()
+                observed = created
                 self.worker_id = created.thread_id
                 self.worker_status = created.status
             else:
                 created = self.controller.start_worker()
+                observed = created
                 self.worker_id = created.thread_id
                 self.worker_status = created.status
             if self.worker_id == self.dev_session_id or self.worker_status not in {"idle", "notLoaded"}:

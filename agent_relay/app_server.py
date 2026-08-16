@@ -231,11 +231,12 @@ class AppServerController:
 
     @staticmethod
     def _thread_from_item(item: dict[str, Any]) -> AppServerThread:
+        source = item.get("threadSource")
         return AppServerThread(
             str(item.get("id")),
             str(item.get("status", {}).get("type", "unknown")),
             item,
-            str(item.get("threadSource", "")),
+            str(source) if source else "",
             str(item.get("cwd", "")),
         )
 
