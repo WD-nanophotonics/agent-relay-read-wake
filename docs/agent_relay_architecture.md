@@ -1,4 +1,4 @@
-# AgentRelay Phase 1 architecture note
+# AgentRelay architecture note (Phase 1 / Phase 2F)
 
 ## Why software waits
 
@@ -8,9 +8,21 @@ The only loop is a bounded Gmail polling loop owned by the supervisor. It consum
 
 Each project owns `state.json`, an append-only `ledger/events.jsonl`, and `inbox/`. `state.json` is atomically replaced after every material change. On restart, consumed Gmail IDs, expected sequence, logical-step hashes, and lease data survive. A malformed state file fails closed.
 
+## Phase 2F App Server ownership
+
+The real wake path is a single Supervisor-owned `codex app-server --stdio`
+JSONL process and connection. `initialize` is correlated before the
+`initialized` notification; thread listing/resume/start establishes a dedicated
+worker, and every lease starts one `turn/start`. Both the matching
+`turn/completed` event and the local `AGENTRELAY_COMPLETION/1` receipt are
+required. Malformed JSON, EOF, active-writer conflicts, unsafe worker identity,
+and missing completion are fail-closed conditions. The old writer is never
+stolen or killed, and the adapter does not fall back to the CLI or Chrome.
+
 ## Future integration points
 
-- `agent_relay.wake.WakeAdapter`: verified Codex App Server/SDK wake and lease acceptance.
+- `agent_relay.wake.WakeAdapter`: verified App Server wake and lease acceptance;
+  the CLI adapter remains an explicit compatibility fallback.
 - `CodexTarget`: official thread/session identity and optional app metadata.
 - `wake_instruction`: the one template for the lease contract.
 - `GoogleGmailGateway`: unchanged read-only Gmail boundary.

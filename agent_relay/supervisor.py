@@ -70,6 +70,17 @@ class Supervisor:
             if self.config.dev_session_id and self.config.dev_session_id == self.config.target_id:
                 self._human_required("self-recursion-target")
                 raise RuntimeError("wake target is the active development session")
+            start_backend = getattr(self.wake_adapter, "start_backend", None)
+            if start_backend is not None:
+                backend = start_backend()
+                if not backend.accepted:
+                    self._human_required("backend-start-failed", detail=backend.detail)
+                    raise RuntimeError(backend.detail)
+                self.state["last"].update({"backend_type": self.config.target_type, "backend_process_id": backend.process_id})
+                worker_id = getattr(self.wake_adapter, "worker_id", None)
+                if worker_id:
+                    self.state["last"]["worker_id"] = worker_id
+                self._save()
             validation = self.wake_adapter.validate_target(self.target)
             if not validation.accepted:
                 self._human_required("target-validation-failed", detail=validation.detail)
@@ -81,6 +92,9 @@ class Supervisor:
     def stop(self) -> None:
         with self.lock:
             self.stop_event.set()
+            stop_backend = getattr(self.wake_adapter, "stop_backend", None)
+            if stop_backend is not None:
+                stop_backend()
             self._transition(SupervisorState.STOPPED, "user-stopped")
             self.ledger.append("SUPERVISOR_STOPPED", project_id=self.config.project_id)
 
@@ -186,6 +200,19 @@ class Supervisor:
                 raise ValueError("completion receipt identity mismatch")
             if record.get("outcome") == "completed" and record.get("lease_kind") == LeaseKind.WORK and record.get("handoff_succeeded") is not True:
                 raise ValueError("completion precedes verified handoff")
+            turn_completed = getattr(self.wake_adapter, "turn_completed", None)
+            if turn_completed is not None:
+                lease = WakeLease(
+                    str(active["lease_id"]), str(active["project_id"]), str(active["run_id"]), int(active["step"]),
+                    Path(str(active["staged_instruction_path"])), str(active["created_at"]),
+                    LeaseKind(str(active.get("lease_kind", LeaseKind.WORK))), str(active.get("completion_token", "")),
+                    str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))),
+                )
+                if not turn_completed(lease):
+                    detail = getattr(self.wake_adapter, "last_error", None)
+                    if detail:
+                        self._human_required("app-server-lifecycle-failed", lease_id=active["lease_id"], detail=detail)
+                    return False
             self.complete_lease(active["lease_id"], record.get("outcome", "failed"))
             return True
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -274,7 +301,8 @@ class Supervisor:
                 self._transition(SupervisorState.WAITING_FOR_REPLY, "no-action", gmail_message_id=message_id)
                 return "no-action"
             self._transition(SupervisorState.READY_TO_WAKE, "wake-authorized", gmail_message_id=message_id)
-            lease = WakeLease.create(self.config.project_id, envelope.run_id, envelope.step, staged, lease_kind, self.config.target_id)
+            worker_id = getattr(self.wake_adapter, "worker_id", self.config.target_id)
+            lease = WakeLease.create(self.config.project_id, envelope.run_id, envelope.step, staged, lease_kind, worker_id)
             self.state["active_lease"] = self._lease_record(lease); self._save()
             self.ledger.append("WAKE_AUTHORIZED", project_id=self.config.project_id, gmail_message_id=message_id, run_id=envelope.run_id, step_id=envelope.step, lease_id=lease.lease_id)
             self._transition(SupervisorState.WAKING, "adapter-invocation", lease_id=lease.lease_id)
@@ -286,6 +314,8 @@ class Supervisor:
             if result.accepted:
                 active = self._lease_record(lease, LeaseStatus.ACTIVE)
                 active["process_id"] = result.process_id
+                if result.turn_id:
+                    active["turn_id"] = result.turn_id
                 self.state["active_lease"] = active; self._save()
                 self.ledger.append("WAKE_SUCCEEDED", project_id=self.config.project_id, lease_id=lease.lease_id, process_id=result.process_id)
                 self._transition(SupervisorState.AGENT_RUNNING, "wake-accepted", lease_id=lease.lease_id, process_id=result.process_id)

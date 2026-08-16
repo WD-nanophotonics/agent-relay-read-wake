@@ -56,9 +56,9 @@ def load_config(home: Path | None = None) -> RelayConfig:
         raise ValueError("project_id must be a non-empty lowercase identifier")
     expand = lambda value: Path(os.path.expandvars(str(value))).expanduser().resolve()
     target_type = str(raw["target_type"])
-    if target_type not in {"mock", "codex-cli"}:
-        raise ValueError("target_type must be mock or codex-cli")
-    if target_type == "codex-cli" and str(raw["chat_url"]) != EXPECTED_CHAT_URL:
+    if target_type not in {"mock", "codex-cli", "codex-app-server"}:
+        raise ValueError("target_type must be mock, codex-cli, or codex-app-server")
+    if target_type in {"codex-cli", "codex-app-server"} and str(raw["chat_url"]) != EXPECTED_CHAT_URL:
         raise ValueError("chat_url must be the configured fixed ChatGPT conversation")
     return RelayConfig(project_id, str(raw["display_name"]), str(raw["channel_id"]), expand(raw["repo_path"]), expand(raw["local_project_storage"]), target_type, str(raw.get("target_id", "")), str(raw["target_label"]), str(raw["chat_url"]), interval, bool(raw.get("enabled", True)), expand(raw["gmail_auth_home"]), str(raw.get("codex_command", "codex.cmd")), str(raw.get("dev_session_id", "")))
 

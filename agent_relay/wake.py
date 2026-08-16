@@ -9,6 +9,8 @@ import subprocess
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from .app_server import AppServerController, AppServerError
+
 
 def utcnow() -> str:
     return datetime.now(UTC).isoformat()
@@ -58,6 +60,7 @@ class WakeResult:
     detail: str = ""
     completed: bool = False
     process_id: int | None = None
+    turn_id: str | None = None
 
 
 class WakeAdapter(Protocol):
@@ -122,3 +125,121 @@ class CodexCliWakeAdapter:
             return WakeResult(False, f"Codex CLI launch failed: {exc}")
         log.close()
         return WakeResult(True, "Codex CLI process launched", completed=False, process_id=process.pid)
+
+
+class CodexAppServerWakeAdapter:
+    """Primary Phase 2F backend: one Supervisor-owned App Server connection."""
+
+    def __init__(self, target: CodexTarget, log_dir: Path, command: str = "codex.cmd", local_project_storage: Path | None = None, dev_session_id: str = ""):
+        self.target = target
+        self.log_dir = log_dir
+        self.command = command
+        self.local_project_storage = local_project_storage or target.repo_path
+        self.dev_session_id = dev_session_id
+        self.controller: AppServerController | None = None
+        self.worker_id = target.target_id
+        self.worker_status = "unknown"
+        self.superseded_worker_id: str | None = None
+        self.last_turn_id: str | None = None
+        self.last_turn_status: str | None = None
+        self.last_error: str | None = None
+
+    def start_backend(self) -> WakeResult:
+        if self.target.target_type != "codex-app-server":
+            return WakeResult(False, "App Server adapter requires codex-app-server target")
+        if not self.worker_id or self.worker_id == self.dev_session_id:
+            return WakeResult(False, "bound App Server worker is missing or equals DEV")
+        self.controller = AppServerController(self.command, self.target.repo_path, self.log_dir / "app-server.log", self.worker_id, self.dev_session_id)
+        try:
+            self.controller.start()
+            observed = self.controller.find_worker(self.worker_id)
+            if observed and observed.status in {"idle"}:
+                self.worker_status = observed.status
+            elif observed and observed.status == "notLoaded":
+                try:
+                    resumed = self.controller.resume_worker(self.worker_id)
+                    self.worker_status = resumed.status
+                except AppServerError as exc:
+                    if "active writer" not in str(exc):
+                        raise
+                    self.superseded_worker_id = self.worker_id
+                    created = self.controller.start_worker()
+                    self.worker_id = created.thread_id
+                    self.worker_status = created.status
+            elif observed and observed.status in {"active", "systemError"}:
+                self.superseded_worker_id = self.worker_id
+                created = self.controller.start_worker()
+                self.worker_id = created.thread_id
+                self.worker_status = created.status
+            else:
+                created = self.controller.start_worker()
+                self.worker_id = created.thread_id
+                self.worker_status = created.status
+            if self.worker_id == self.dev_session_id or self.worker_status not in {"idle", "notLoaded"}:
+                raise AppServerError(f"unsafe worker status: {self.worker_status}")
+            if self.worker_id != self.target.target_id:
+                from .config import EXPECTED_CHAT_URL, app_home, save_binding
+                save_binding(app_home(), target_id=self.worker_id, target_type="codex-app-server", chat_url=EXPECTED_CHAT_URL, dev_session_id=self.dev_session_id)
+            return WakeResult(True, "App Server initialized", process_id=self.controller.pid)
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.stop_backend()
+            return WakeResult(False, f"App Server startup failed: {exc}")
+
+    def stop_backend(self) -> None:
+        if self.controller:
+            self.controller.stop()
+        self.controller = None
+        self.worker_status = "stopped"
+
+    def validate_target(self, target: CodexTarget) -> WakeResult:
+        if target.target_type != "codex-app-server" or target.repo_path != self.target.repo_path:
+            return WakeResult(False, "codex-app-server target mismatch")
+        if self.worker_id == self.dev_session_id or not self.worker_id:
+            return WakeResult(False, "App Server worker equals DEV or is missing")
+        if not self.controller or not self.controller.alive:
+            return WakeResult(False, "owned App Server is not healthy")
+        if self.worker_status not in {"idle", "notLoaded"}:
+            return WakeResult(False, f"worker is not safely wakeable: {self.worker_status}")
+        return WakeResult(True, "owned App Server and worker validated")
+
+    def wake(self, lease: WakeLease, instruction: str) -> WakeResult:
+        valid = self.validate_target(self.target)
+        if not valid.accepted or not self.controller:
+            return valid
+        if lease.worker_id != self.worker_id:
+            return WakeResult(False, "lease worker does not match App Server binding")
+        try:
+            observed = self.controller.find_worker(self.worker_id)
+            if observed is None:
+                # A freshly provisioned App Server thread may not yet be visible
+                # through the state-db listing; retain the authoritative status
+                # returned by thread/start on this owned connection.
+                if self.worker_status not in {"idle", "notLoaded"}:
+                    return WakeResult(False, f"worker status is not safe: missing")
+            elif observed.status not in {"idle", "notLoaded"}:
+                return WakeResult(False, f"worker status is not safe: {observed.status if observed else 'missing'}")
+            turn = self.controller.start_turn(self.worker_id, instruction, [self.target.repo_path, self.local_project_storage])
+            self.last_turn_id = turn.turn_id
+            self.last_turn_status = turn.status
+            self.worker_status = "active"
+            return WakeResult(True, "App Server turn started", process_id=self.controller.pid, turn_id=turn.turn_id)
+        except Exception as exc:
+            self.last_error = str(exc)
+            return WakeResult(False, f"App Server turn start failed: {exc}")
+
+    def turn_completed(self, lease: WakeLease) -> bool:
+        if not self.controller or not self.last_turn_id or lease.worker_id != self.worker_id:
+            return False
+        try:
+            for event in self.controller.poll_notifications():
+                if event.get("method") == "turn/completed":
+                    params = event.get("params", {})
+                    turn = params.get("turn", {})
+                    if params.get("threadId") == self.worker_id and turn.get("id") == self.last_turn_id:
+                        self.last_turn_status = str(turn.get("status", "completed"))
+                        self.worker_status = "idle"
+            return self.last_turn_status in {"completed", "interrupted", "failed"} and self.worker_status == "idle"
+        except AppServerError as exc:
+            self.last_error = str(exc)
+            return False

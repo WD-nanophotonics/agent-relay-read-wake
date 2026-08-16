@@ -7,7 +7,7 @@ from .config import app_home, config_path, load_config, save_binding, write_exam
 from .gmail import GoogleGmailGateway
 from .supervisor import Supervisor, write_completion_receipt
 from .ui import RelayApp
-from .wake import CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
+from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
 
 
 def main(argv=None) -> int:
@@ -49,7 +49,12 @@ def main(argv=None) -> int:
         print("COMPLETION_RECORDED")
         return 0
     target = CodexTarget(config.target_type, config.target_id, config.target_label, config.repo_path)
-    adapter = MockWakeAdapter() if config.target_type == "mock" else CodexCliWakeAdapter(target, config.local_project_storage / "logs", config.codex_command)
+    if config.target_type == "mock":
+        adapter = MockWakeAdapter()
+    elif config.target_type == "codex-app-server":
+        adapter = CodexAppServerWakeAdapter(target, config.local_project_storage / "logs", config.codex_command, config.local_project_storage, config.dev_session_id)
+    else:
+        adapter = CodexCliWakeAdapter(target, config.local_project_storage / "logs", config.codex_command)
     app = RelayApp(Supervisor(config, GoogleGmailGateway(config.gmail_auth_home), adapter))
     app.mainloop()
     return 0

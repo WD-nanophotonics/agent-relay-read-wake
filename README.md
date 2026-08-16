@@ -1,4 +1,4 @@
-# AgentRelay Read & Wake Supervisor (Phase 1)
+# AgentRelay Read & Wake Supervisor (Phase 1 / Phase 2F)
 
 This repository contains two deliberately separate local tools:
 
@@ -58,11 +58,33 @@ Staged content is stored as `inbox/RUN-…/STEP-…/message.txt`, `manifest.json
 
 Phase 2 supplies a real `WakeAdapter` that binds to a verified Codex thread/session, a real end-of-lease contract, and optional Chrome/ChatGPT handoff. It must not replace the deterministic protocol, state machine, staging layout, or one-active-lease invariant.
 
+## Phase 2F App Server configuration
+
+Phase 2F makes a Supervisor-owned `codex app-server --stdio` JSONL connection the
+primary real wake path. The supervisor initializes one long-lived connection,
+binds one dedicated worker, starts at most one turn per lease, and requires both
+`turn/completed` and the matching local completion receipt before accepting a
+diagnostic completion. If a previously bound worker is locked by another writer,
+AgentRelay provisions a new worker through that same App Server and persists the
+new binding; it never steals or kills the old writer. The App Server process is
+started with Windows no-console flags and is stopped with the supervisor.
+
+Set `target_type = "codex-app-server"` and bind the dedicated worker with
+`agent-relay bind --target-id <worker-id> --target-type codex-app-server`.
+`codex-cli` remains an explicit compatibility fallback only; it is not the Phase
+2F primary path. The App Server adapter never falls back to the CLI or Chrome.
+
 ## Phase 2 real-wake configuration
 
 Set `target_type = "codex-cli"`, an exact Codex session UUID in `target_id`, and the local CLI command in `codex_command`. The real adapter uses the official `codex exec resume <session-id>` fallback with Windows no-console flags; launch acceptance becomes `AGENT_RUNNING`, never completion. Each lease carries an unpredictable completion token and a `WORK` or `DIAGNOSTIC` kind. Work completion requires explicit handoff evidence; bounded diagnostics may complete without ChatGPT via `agent-relay complete-diagnostic --lease-id <id> --completion-token <token>`. The supervisor validates protocol, kind, lease ID, and token before an atomic completion record can move it to `WAITING_FOR_REPLY`.
 
 `scripts/phase2d_diagnostic.py` is a one-message, bounded diagnostic harness for the configured worker. It does not authorize a second wake after a timeout. An abandoned lease is resolved through the audited supervisor recovery path and remains `HUMAN_REQUIRED`.
+
+`scripts/phase2f_diagnostic.py` is the Phase 2F one-message harness. It reads the
+already-authorized message through the local Python Gmail gateway, records
+process/worker/turn and foreground-console evidence, and never polls Gmail again
+or tests Chrome. A real diagnostic is attempted once; a missing receipt or
+App Server lifecycle error is a blocker rather than an automatic retry.
 
 An unknown persisted active lease enters `HUMAN_REQUIRED` on restart rather than being awakened again. The ChatGPT URL remains an explicit configuration field; browser handoff is intentionally unavailable unless a separately functional, silent-background-certified adapter is configured.
 
