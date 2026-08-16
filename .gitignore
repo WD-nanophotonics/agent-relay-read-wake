@@ -13,3 +13,6 @@ agentrelay.toml
 data/
 runtime/
 *.tmp
+# Local AgentRelay runtime aliases (canonical data lives under %LOCALAPPDATA%).
+.agent-relay/
+agent-relay-runtime/

@@ -8,13 +8,14 @@ from .config import app_home, config_path, load_config, save_binding, write_exam
 from .gmail import GoogleGmailGateway
 from .handoff import write_evidence
 from .supervisor import Supervisor, write_completion_receipt
+from .runner import BackgroundRunner, runner_status, start_background, stop_background
 from .ui import RelayApp
 from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "ui", "run", "complete", "complete-diagnostic", "complete-work", "record-handoff", "bind"), nargs="?", default="ui")
+    parser.add_argument("command", choices=("init", "ui", "run", "run-background-worker", "start-background", "stop-background", "status", "complete", "complete-diagnostic", "complete-work", "record-handoff", "bind"), nargs="?", default="ui")
     parser.add_argument("--lease-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
@@ -39,6 +40,21 @@ def main(argv=None) -> int:
             parser.error("bind requires --target-id")
         print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type, chat_url=args.chat_url or 'https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9', dev_session_id=args.dev_session_id or '')}")
         return 0
+    if args.command in {"status", "start-background", "stop-background", "run-background-worker"}:
+        config = load_config(home)
+        if args.command == "status":
+            import json
+            print(json.dumps(runner_status(config), ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "start-background":
+            ok, detail = start_background(config)
+            print(f"BACKGROUND_START {'OK' if ok else 'FAILED'} {detail}")
+            return 0 if ok else 1
+        if args.command == "stop-background":
+            ok, detail = stop_background(config)
+            print(f"BACKGROUND_STOP {'OK' if ok else 'FAILED'} {detail}")
+            return 0 if ok else 1
+        return BackgroundRunner(config).run()
     if args.command == "complete-diagnostic":
         if not args.lease_id or not args.completion_token:
             parser.error("complete-diagnostic requires --lease-id and --completion-token")

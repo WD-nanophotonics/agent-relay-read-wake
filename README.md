@@ -1,4 +1,4 @@
-# AgentRelay Read & Wake Supervisor (Phase 1 / Phase 2F)
+# AgentRelay Read & Wake Supervisor (Phase 1 / Phase 3A)
 
 This repository contains two deliberately separate local tools:
 
@@ -87,6 +87,28 @@ or tests Chrome. A real diagnostic is attempted once; a missing receipt or
 App Server lifecycle error is a blocker rather than an automatic retry.
 
 An unknown persisted active lease enters `HUMAN_REQUIRED` on restart rather than being awakened again. The ChatGPT URL remains an explicit configuration field; browser handoff is intentionally unavailable unless a separately functional, silent-background-certified adapter is configured.
+
+## Phase 3A production background runner
+
+Phase 3A adds a hidden, single-instance Windows background runner while keeping
+the foreground `run` command for diagnostics. It persists runner identity, PID,
+backend worker, heartbeat, current run/step, and active lease ID in the project
+runtime directory. An atomic cross-process ownership file prevents duplicate
+workers; an orphaned lock is recoverable only after its recorded PID is dead.
+Runtime metadata never contains OAuth credentials or lease tokens.
+
+```powershell
+agent-relay start-background
+agent-relay status
+agent-relay stop-background
+```
+
+The detached launcher creates no console or focus takeover. Stop requests are
+honored only at a processing boundary: an active lease is never killed or
+silently abandoned, and the runner reports `ACTIVE_LEASE` until its audited
+outcome. Gmail polling follows the configured interval while heartbeats remain
+observable. Phase 3A does not expand Chrome automation or author the next Gmail
+task; the fixed ChatGPT handoff remains an explicit external contract.
 
 ---
 
