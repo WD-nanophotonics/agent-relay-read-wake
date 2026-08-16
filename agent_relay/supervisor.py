@@ -335,7 +335,17 @@ class Supervisor:
                 self._human_required("conflicting-logical-step", message_id, run_id=envelope.run_id, step_id=envelope.step); return "human-required"
             if envelope.step < expected:
                 self.ledger.append("MESSAGE_IGNORED", project_id=self.config.project_id, gmail_message_id=message_id, reason="old-step", run_id=envelope.run_id, step_id=envelope.step); return "old"
-            if envelope.step > expected or envelope.parent != self.state["expected_parent"]:
+            if envelope.step > expected:
+                # A next-step WAKE can legitimately arrive while the prior
+                # transport is draining, or before the immediately preceding
+                # NO_ACTION sync message is observed in a Gmail page. Keep it
+                # in Inbox for the next poll instead of converting ordering
+                # overlap into HUMAN_REQUIRED.
+                if envelope.step == expected + 1 and self.state.get("current_run") == envelope.run_id and not self.state.get("active_lease"):
+                    self.ledger.append("MESSAGE_DEFERRED", project_id=self.config.project_id, gmail_message_id=message_id, reason="future-step-awaiting-sync", run_id=envelope.run_id, step_id=envelope.step)
+                    return "deferred"
+                self._human_required("out-of-order-step-or-parent", message_id, run_id=envelope.run_id, step_id=envelope.step); return "human-required"
+            if envelope.parent != self.state["expected_parent"]:
                 self._human_required("out-of-order-step-or-parent", message_id, run_id=envelope.run_id, step_id=envelope.step); return "human-required"
             if self.state.get("active_lease"):
                 self._human_required("active-lease-exists", message_id, run_id=envelope.run_id, step_id=envelope.step); return "human-required"
