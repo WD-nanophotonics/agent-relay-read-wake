@@ -20,6 +20,8 @@ class AppServerThread:
     thread_id: str
     status: str
     raw: dict[str, Any]
+    source_kind: str = ""
+    cwd: str = ""
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class AppServerController:
         self.last_status: str = "unknown"
         self.last_error: str | None = None
         self.last_turn_id: str | None = None
+        self.notification_events: list[dict[str, Any]] = []
 
     @property
     def pid(self) -> int | None:
@@ -190,7 +193,9 @@ class AppServerController:
         raise AppServerError(f"timed out waiting for App Server response: {method}")
 
     def _handle_server_message(self, message: dict[str, Any]) -> None:
-        if message.get("method") and "id" in message:
+        if message.get("method") and "id" not in message:
+            self.notification_events.append(message)
+        elif message.get("method") and "id" in message:
             # AgentRelay never grants interactive approval or user input.
             try:
                 self._send({"id": message["id"], "error": {"code": -32000, "message": "AgentRelay does not approve interactive requests"}})
@@ -198,7 +203,8 @@ class AppServerController:
                 pass
 
     def poll_notifications(self) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = self.notification_events
+        self.notification_events = []
         while True:
             try:
                 message = self.messages.get_nowait()
@@ -210,36 +216,64 @@ class AppServerController:
                 raise AppServerError(message["__agentrelay_error__"])
             if message.get("method"):
                 self._handle_server_message(message)
-                events.append(message)
+        events.extend(self.notification_events)
+        self.notification_events = []
         return events
 
     def list_threads(self, cwd: Path | None = None) -> list[AppServerThread]:
-        params: dict[str, Any] = {"limit": 100, "useStateDbOnly": True}
+        params: dict[str, Any] = {"limit": 100, "useStateDbOnly": True, "sourceKinds": ["appServer"]}
         if cwd:
             params["cwd"] = str(cwd.resolve()).replace("\\", "/")
         result = self.request("thread/list", params)
         data = result.get("data", [])
         items = data.get("items", []) if isinstance(data, dict) else data
-        return [AppServerThread(str(item.get("id")), str(item.get("status", {}).get("type", "unknown")), item) for item in items if item.get("id")]
+        return [self._thread_from_item(item) for item in items if item.get("id")]
+
+    @staticmethod
+    def _thread_from_item(item: dict[str, Any]) -> AppServerThread:
+        return AppServerThread(
+            str(item.get("id")),
+            str(item.get("status", {}).get("type", "unknown")),
+            item,
+            str(item.get("threadSource", "")),
+            str(item.get("cwd", "")),
+        )
 
     def find_worker(self, worker_id: str | None = None) -> AppServerThread | None:
         wanted = worker_id or self.worker_id
         return next((item for item in self.list_threads(self.repo_path) if item.thread_id == wanted), None)
 
+    def read_worker(self, worker_id: str | None = None) -> AppServerThread:
+        wanted = worker_id or self.worker_id
+        result = self.request("thread/read", {"threadId": wanted, "includeTurns": False})
+        item = result.get("thread", result)
+        if not item.get("id"):
+            raise AppServerError(f"thread/read returned no thread: {result}")
+        return self._thread_from_item(item)
+
     def start_worker(self) -> AppServerThread:
-        result = self.request("thread/start", {"cwd": str(self.repo_path), "threadSource": "appServer", "approvalPolicy": "never", "sandbox": "workspace-write", "historyMode": "paginated"})
+        result = self.request("thread/start", {"cwd": str(self.repo_path), "threadSource": "appServer", "approvalPolicy": "never", "sandbox": "workspace-write"})
         item = result.get("thread", result)
         thread_id = str(item.get("id", ""))
         if not thread_id:
             raise AppServerError(f"thread/start returned no thread id: {result}")
         self.worker_id = thread_id
-        return AppServerThread(thread_id, str(item.get("status", {}).get("type", "idle")), item)
+        direct = self._thread_from_item(item)
+        try:
+            exact = self.read_worker(thread_id)
+        except AppServerError:
+            # The exact thread/start response is authoritative on this owned
+            # connection even if a follow-up read is not yet available.
+            exact = direct
+        if exact.thread_id != thread_id:
+            raise AppServerError("thread/read returned an unrelated worker")
+        return exact
 
     def resume_worker(self, worker_id: str) -> AppServerThread:
         result = self.request("thread/resume", {"threadId": worker_id, "cwd": str(self.repo_path), "approvalPolicy": "never", "sandbox": "workspace-write", "excludeTurns": True})
         item = result.get("thread", result)
         status = str(item.get("status", {}).get("type", "unknown"))
-        return AppServerThread(str(item.get("id", worker_id)), status, item)
+        return self._thread_from_item(item)
 
     def start_turn(self, worker_id: str, instruction: str, writable_roots: list[Path]) -> AppServerTurn:
         result = self.request("turn/start", {

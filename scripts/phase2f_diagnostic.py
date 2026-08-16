@@ -15,7 +15,7 @@ from agent_relay.supervisor import Supervisor
 from agent_relay.wake import CodexAppServerWakeAdapter, CodexTarget, LeaseKind
 
 
-MESSAGE_ID = "1a00b07c0eb9afc8"
+MESSAGE_ID = "1a00b1d38bece679"
 
 
 def foreground() -> dict[str, int]:

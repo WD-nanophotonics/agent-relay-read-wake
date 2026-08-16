@@ -153,6 +153,11 @@ class CodexAppServerWakeAdapter:
         try:
             self.controller.start()
             observed = self.controller.find_worker(self.worker_id)
+            if observed is None:
+                try:
+                    observed = self.controller.read_worker(self.worker_id)
+                except AppServerError:
+                    observed = None
             if observed and observed.status in {"idle"}:
                 self.worker_status = observed.status
             elif observed and observed.status == "notLoaded":
@@ -177,6 +182,8 @@ class CodexAppServerWakeAdapter:
                 self.worker_status = created.status
             if self.worker_id == self.dev_session_id or self.worker_status not in {"idle", "notLoaded"}:
                 raise AppServerError(f"unsafe worker status: {self.worker_status}")
+            if observed and observed.source_kind and observed.source_kind != "appServer":
+                raise AppServerError(f"worker source is not App Server-owned: {observed.source_kind}")
             if self.worker_id != self.target.target_id:
                 from .config import EXPECTED_CHAT_URL, app_home, save_binding
                 save_binding(app_home(), target_id=self.worker_id, target_type="codex-app-server", chat_url=EXPECTED_CHAT_URL, dev_session_id=self.dev_session_id)
@@ -212,13 +219,17 @@ class CodexAppServerWakeAdapter:
         try:
             observed = self.controller.find_worker(self.worker_id)
             if observed is None:
-                # A freshly provisioned App Server thread may not yet be visible
-                # through the state-db listing; retain the authoritative status
-                # returned by thread/start on this owned connection.
-                if self.worker_status not in {"idle", "notLoaded"}:
-                    return WakeResult(False, f"worker status is not safe: missing")
+                try:
+                    observed = self.controller.read_worker(self.worker_id)
+                except AppServerError:
+                    # A freshly provisioned thread/start response is authoritative
+                    # on this exact owned connection when read/list are delayed.
+                    if self.controller.worker_id != self.worker_id or self.worker_status not in {"idle", "notLoaded"}:
+                        return WakeResult(False, "worker status is not safe: missing")
             elif observed.status not in {"idle", "notLoaded"}:
                 return WakeResult(False, f"worker status is not safe: {observed.status if observed else 'missing'}")
+            if observed and observed.source_kind and observed.source_kind != "appServer":
+                return WakeResult(False, f"worker source is not App Server-owned: {observed.source_kind}")
             turn = self.controller.start_turn(self.worker_id, instruction, [self.target.repo_path, self.local_project_storage])
             self.last_turn_id = turn.turn_id
             self.last_turn_status = turn.status

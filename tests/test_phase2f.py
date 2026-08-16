@@ -92,3 +92,34 @@ def test_app_server_reader_rejects_malformed_json_and_eof(tmp_path):
     controller._read_loop()
     with pytest.raises(AppServerError, match="malformed"):
         controller.poll_notifications()
+
+
+def test_thread_list_is_explicitly_app_server_only(tmp_path):
+    controller = AppServerController("codex.cmd", tmp_path, tmp_path / "x.log", "worker")
+    seen = {}
+    def request(method, params, timeout=20):
+        seen.update(params)
+        return {"data": []}
+    controller.request = request
+    assert controller.list_threads() == []
+    assert seen["sourceKinds"] == ["appServer"] and seen["useStateDbOnly"] is True
+
+
+def test_thread_start_uses_returned_id_and_exact_read_without_history_mode(tmp_path):
+    controller = AppServerController("codex.cmd", tmp_path, tmp_path / "x.log", "worker")
+    calls = []
+    def request(method, params, timeout=20):
+        calls.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": "new-worker", "status": {"type": "idle"}, "threadSource": "appServer", "cwd": str(tmp_path)}}
+        return {"thread": {"id": "new-worker", "status": {"type": "idle"}, "threadSource": "appServer", "cwd": str(tmp_path)}}
+    controller.request = request
+    worker = controller.start_worker()
+    assert worker.thread_id == "new-worker" and worker.source_kind == "appServer"
+    assert "historyMode" not in calls[0][1] and calls[1][0] == "thread/read"
+
+
+def test_notifications_are_retained_while_correlating_request(tmp_path):
+    controller = AppServerController("codex.cmd", tmp_path, tmp_path / "x.log", "worker")
+    controller._handle_server_message({"method": "thread/started", "params": {"thread": {"id": "worker"}}})
+    assert controller.poll_notifications()[0]["method"] == "thread/started"
