@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from threading import Event, RLock
 from typing import Any
+from uuid import UUID
 
 from .config import RelayConfig
 from .gmail import GmailGateway, GmailMessage
@@ -155,13 +156,14 @@ class Supervisor:
     def completion_path(self, lease_id: str) -> Path:
         return self.config.local_project_storage / "completions" / f"{lease_id}.json"
 
-    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "", completion_token: str = "", lease_kind: str = "WORK") -> Path:
+    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "", completion_token: str = "", lease_kind: str | None = None) -> Path:
         if outcome not in {"completed", "failed"}:
             raise ValueError("completion outcome must be completed or failed")
         active = self.state.get("active_lease")
         if active and active.get("lease_id") == lease_id:
             completion_token = completion_token or str(active.get("completion_token", ""))
-            lease_kind = str(active.get("lease_kind", lease_kind))
+            lease_kind = lease_kind or str(active.get("lease_kind", LeaseKind.WORK))
+        lease_kind = lease_kind or LeaseKind.WORK
         target = self.completion_path(lease_id)
         if outcome == "completed" and lease_kind == LeaseKind.WORK and not handoff_succeeded:
             raise RuntimeError("successful lease completion requires verified ChatGPT handoff")
@@ -300,6 +302,10 @@ class Supervisor:
 def write_completion_receipt(project_storage: Path, lease_id: str, completion_token: str, lease_kind: str = "DIAGNOSTIC") -> Path:
     if lease_kind != LeaseKind.DIAGNOSTIC:
         raise ValueError("complete-diagnostic only accepts DIAGNOSTIC leases")
+    try:
+        UUID(lease_id)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("lease_id must be a UUID") from exc
     target = project_storage / "completions" / f"{lease_id}.json"
     atomic_json(target, {"protocol": "AGENTRELAY_COMPLETION/1", "lease_id": lease_id, "lease_kind": lease_kind, "completion_token": completion_token, "outcome": "completed", "handoff_succeeded": False, "recorded_at": now()})
     return target

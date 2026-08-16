@@ -67,8 +67,14 @@ class WakeAdapter(Protocol):
 
 def wake_instruction(lease: WakeLease) -> str:
     if lease.lease_kind is LeaseKind.DIAGNOSTIC:
-        return f"""AGENTRELAY_DIAGNOSTIC_WAKE/1\n\nProject: {lease.project_id}\nLease: {lease.lease_id}\nWorker: {lease.worker_id}\nStaged instruction: {lease.staged_instruction_path}\n\nThis is a no-side-effect diagnostic lease. Do not modify repository files, access Gmail or Chrome, commit, push, create another turn, wait, or retry. Verify the identities above, then execute exactly once:\npython -m agent_relay.cli complete-diagnostic --lease-id {lease.lease_id} --completion-token {lease.completion_token}\nAfter the command succeeds, terminate this Codex turn.\n"""
+        return f"""AGENTRELAY_DIAGNOSTIC_WAKE/1\n\nProject: {lease.project_id}\nLease: {lease.lease_id}\nWorker: {lease.worker_id}\nStaged instruction: {lease.staged_instruction_path}\n\nThis is a no-side-effect diagnostic lease. Do not modify repository files, access Gmail or Chrome, commit, push, create another turn, wait, or retry. Verify the identities above, then execute exactly once:\n{diagnostic_completion_command(lease)}\nAfter the command succeeds, terminate this Codex turn.\n"""
     return f"""AGENTRELAY_WAKE/1\n\nProject: {lease.project_id}\nRun: {lease.run_id}\nStep: {lease.step:04d}\nLease: {lease.lease_id}\nStaged instruction: {lease.staged_instruction_path}\n\nRead the authoritative staged instruction and execute exactly one work lease. Test, inspect the diff, commit and push applicable changes, then complete the configured ChatGPT handoff before writing a successful completion receipt. Do not poll Gmail, wait for ChatGPT, retry autonomously, or begin another workflow step without a new supervisor wake.\n"""
+
+
+def diagnostic_completion_command(lease: WakeLease) -> str:
+    if lease.lease_kind is not LeaseKind.DIAGNOSTIC:
+        raise ValueError("completion command requires a diagnostic lease")
+    return f"python -m agent_relay.cli complete-diagnostic --lease-id {lease.lease_id} --completion-token {lease.completion_token}"
 
 
 class MockWakeAdapter:

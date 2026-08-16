@@ -13,7 +13,7 @@ from .wake import CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
     parser.add_argument("command", choices=("init", "ui", "complete", "complete-diagnostic", "bind"), nargs="?", default="ui")
-    parser.add_argument("lease_id", nargs="?")
+    parser.add_argument("--lease-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
     parser.add_argument("--chat-url")
@@ -36,13 +36,14 @@ def main(argv=None) -> int:
     if args.command == "complete-diagnostic":
         if not args.lease_id or not args.completion_token:
             parser.error("complete-diagnostic requires --lease-id and --completion-token")
-        path = write_completion_receipt(app_home() / "projects" / "gmail-courier", args.lease_id, args.completion_token)
+        config = load_config(home)
+        path = write_completion_receipt(config.local_project_storage, args.lease_id, args.completion_token)
         print(f"DIAGNOSTIC_COMPLETION_RECORDED {path}")
         return 0
     config = load_config(home)
     if args.command == "complete":
         if not args.lease_id:
-            parser.error("complete requires a lease_id")
+            parser.error("complete requires --lease-id")
         relay = Supervisor(config, None, MockWakeAdapter())
         relay.write_completion_record(args.lease_id, handoff_succeeded=args.handoff_succeeded)
         print("COMPLETION_RECORDED")

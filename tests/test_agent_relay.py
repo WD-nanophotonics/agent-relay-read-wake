@@ -141,6 +141,21 @@ def test_diagnostic_completion_requires_exact_token_and_kind(tmp_path):
     write_completion_receipt(config(tmp_path).local_project_storage, active["lease_id"], active["completion_token"])
     assert relay.consume_completion_record()
     assert relay.snapshot()["state"] == SupervisorState.WAITING_FOR_REPLY
+    assert not relay.consume_completion_record()
+
+
+def test_diagnostic_wrong_token_and_kind_fail_closed(tmp_path):
+    class Realish:
+        def validate_target(self, _target): return WakeResult(True, "bound")
+        def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False)
+    relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start(); relay.process_message_id("m1", LeaseKind.DIAGNOSTIC)
+    active = relay.snapshot()["active_lease"]
+    relay.write_completion_record(active["lease_id"], completion_token="wrong", lease_kind="DIAGNOSTIC")
+    assert not relay.consume_completion_record() and relay.snapshot()["active_lease"] is not None
+    relay2 = Supervisor(config(tmp_path / "kind"), FakeGmail([message()]), Realish()); relay2.start(); relay2.process_message_id("m1", LeaseKind.DIAGNOSTIC)
+    active2 = relay2.snapshot()["active_lease"]
+    relay2.write_completion_record(active2["lease_id"], outcome="failed", completion_token=active2["completion_token"], lease_kind="WORK")
+    assert not relay2.consume_completion_record() and relay2.snapshot()["active_lease"] is not None
 
 
 def test_self_recursion_target_is_rejected(tmp_path):
