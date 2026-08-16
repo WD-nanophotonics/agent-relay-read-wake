@@ -54,7 +54,7 @@ def test_app_server_adapter_owns_one_backend_and_one_turn(monkeypatch, tmp_path)
     started = adapter.start_backend()
     assert started.accepted and adapter.controller.pid == 4321
     assert adapter.validate_target(adapter.target).accepted
-    lease = __import__("agent_relay.wake", fromlist=["WakeLease"]).WakeLease.create("gmail-courier", "RUN", 1, tmp_path / "instruction", worker_id="worker")
+    lease = __import__("agent_relay.wake", fromlist=["WakeLease"]).WakeLease.create("gmail-courier", "RUN", 1, tmp_path / "instruction", worker_id=adapter.worker_id)
     result = adapter.wake(lease, "instruction")
     assert result.accepted and result.turn_id == "turn-1"
     assert adapter.turn_completed(lease)
