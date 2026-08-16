@@ -11,7 +11,7 @@ from typing import Any
 from .config import RelayConfig
 from .gmail import GmailGateway, GmailMessage
 from .protocol import Disposition, ProtocolError, parse_envelope
-from .storage import Ledger, StateStore, now, read_content_hash, stage_instruction
+from .storage import Ledger, StateStore, atomic_json, now, read_content_hash, stage_instruction
 from .wake import CodexTarget, LeaseStatus, WakeAdapter, WakeLease, wake_instruction
 
 
@@ -35,7 +35,11 @@ class Supervisor:
         self.stop_event = Event()
         self.lock = RLock()
         self.state = self.store.load()
-        self.state["state"] = SupervisorState.STOPPED
+        if self.state.get("active_lease"):
+            self.state["state"] = SupervisorState.HUMAN_REQUIRED
+            self.state["last_error"] = "RECOVERY_REQUIRED: persisted lease outcome is unknown"
+        else:
+            self.state["state"] = SupervisorState.STOPPED
         self.store.save(self.state)
 
     @property
@@ -60,6 +64,12 @@ class Supervisor:
         with self.lock:
             if not self.config.enabled:
                 raise RuntimeError("project is disabled")
+            if self.state.get("active_lease"):
+                raise RuntimeError("RECOVERY_REQUIRED: resolve the persisted active lease before monitoring")
+            validation = self.wake_adapter.validate_target(self.target)
+            if not validation.accepted:
+                self._human_required("target-validation-failed", detail=validation.detail)
+                raise RuntimeError(validation.detail)
             self.stop_event.clear()
             self._transition(SupervisorState.MONITORING, "user-started")
             self.ledger.append("SUPERVISOR_STARTED", project_id=self.config.project_id)
@@ -90,10 +100,28 @@ class Supervisor:
         self.ledger.append("WAKE_SUCCEEDED" if result.accepted else "WAKE_FAILED", project_id=self.config.project_id, lease_id=lease.lease_id, reason="manual-mock-test")
         return result.accepted
 
+    def complete_lease(self, lease_id: str, outcome: str = "completed") -> None:
+        """Deterministic local completion callback; exact active lease ID is required."""
+        with self.lock:
+            active = self.state.get("active_lease")
+            if not active or active.get("lease_id") != lease_id or self.state["state"] != SupervisorState.AGENT_RUNNING:
+                raise RuntimeError("completion does not match the active running lease")
+            active["status"] = LeaseStatus.COMPLETED.value if outcome == "completed" else LeaseStatus.FAILED.value
+            self.state["active_lease"] = None
+            self.state["last"]["last_lease"] = active
+            self.state["last"]["last_agent_completion"] = outcome
+            self._save()
+            self.ledger.append("LEASE_COMPLETED" if outcome == "completed" else "LEASE_FAILED", project_id=self.config.project_id, lease_id=lease_id, reason=outcome)
+            if outcome == "completed":
+                self._transition(SupervisorState.WAITING_FOR_REPLY, "deterministic-lease-completion", lease_id=lease_id)
+            else:
+                self._human_required("agent-lease-failed", lease_id=lease_id)
+
     def poll_once(self) -> None:
         with self.lock:
             if self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY) or self.stop_event.is_set():
                 return
+            self.consume_completion_record()
         try:
             ids = self.gateway.list_messages()
             self.ledger.append("GMAIL_POLLED", project_id=self.config.project_id, count=len(ids))
@@ -104,6 +132,34 @@ class Supervisor:
                 self.process_message_id(message_id)
         except Exception as exc:
             self._error("gmail-poll-failed", str(exc))
+
+    def completion_path(self, lease_id: str) -> Path:
+        return self.config.local_project_storage / "completions" / f"{lease_id}.json"
+
+    def write_completion_record(self, lease_id: str, outcome: str = "completed") -> Path:
+        if outcome not in {"completed", "failed"}:
+            raise ValueError("completion outcome must be completed or failed")
+        target = self.completion_path(lease_id)
+        atomic_json(target, {"lease_id": lease_id, "outcome": outcome, "recorded_at": now()})
+        return target
+
+    def consume_completion_record(self) -> bool:
+        active = self.state.get("active_lease")
+        if not active or self.state["state"] != SupervisorState.AGENT_RUNNING:
+            return False
+        path = self.completion_path(active["lease_id"])
+        if not path.exists():
+            return False
+        try:
+            import json
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if record.get("lease_id") != active["lease_id"]:
+                raise ValueError("lease ID mismatch")
+            self.complete_lease(active["lease_id"], record.get("outcome", "failed"))
+            return True
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self._human_required("malformed-completion-record", active["lease_id"], detail=str(exc))
+            return False
 
     def _error(self, reason: str, detail: str) -> None:
         with self.lock:
@@ -197,11 +253,15 @@ class Supervisor:
         result = self.wake_adapter.wake(lease, wake_instruction(lease))
         with self.lock:
             if result.accepted:
-                completed = self._lease_record(lease, LeaseStatus.COMPLETED)
-                self.state["active_lease"] = None; self.state["last"]["last_lease"] = completed; self._save()
-                self.ledger.append("WAKE_SUCCEEDED", project_id=self.config.project_id, lease_id=lease.lease_id)
-                self._transition(SupervisorState.WAITING_FOR_REPLY, "mock-lease-completed", lease_id=lease.lease_id)
-                return "woken"
+                active = self._lease_record(lease, LeaseStatus.ACTIVE)
+                active["process_id"] = result.process_id
+                self.state["active_lease"] = active; self._save()
+                self.ledger.append("WAKE_SUCCEEDED", project_id=self.config.project_id, lease_id=lease.lease_id, process_id=result.process_id)
+                self._transition(SupervisorState.AGENT_RUNNING, "wake-accepted", lease_id=lease.lease_id, process_id=result.process_id)
+                if result.completed:
+                    self.complete_lease(lease.lease_id)
+                    return "woken"
+                return "wake-accepted"
             self.state["active_lease"] = None; self._save()
             self.ledger.append("WAKE_FAILED", project_id=self.config.project_id, lease_id=lease.lease_id, reason=result.detail[:500])
             self._human_required("wake-failed", message_id, lease_id=lease.lease_id)

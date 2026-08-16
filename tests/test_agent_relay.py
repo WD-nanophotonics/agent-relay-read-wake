@@ -10,7 +10,7 @@ from agent_relay.config import RelayConfig
 from agent_relay.gmail import Attachment, GmailMessage
 from agent_relay.protocol import Disposition, ProtocolError, parse_envelope
 from agent_relay.supervisor import Supervisor, SupervisorState
-from agent_relay.wake import MockWakeAdapter
+from agent_relay.wake import MockWakeAdapter, WakeResult
 
 
 def envelope(*, channel="AR-GMAILCOURIER-A1R7P", run="RUN-20260816-001", step=1, parent=0, disposition="WAKE", project="gmail-courier"):
@@ -93,6 +93,30 @@ def test_manual_mock_wake_requires_monitoring_and_is_bounded(tmp_path):
     relay.stop()
     with pytest.raises(RuntimeError, match="Start monitoring"):
         relay.test_wake()
+
+
+def test_real_wake_acceptance_keeps_lease_running_until_completion_record(tmp_path):
+    class Realish:
+        def validate_target(self, _target): return WakeResult(True, "bound")
+        def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False, process_id=1234)
+    relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish())
+    relay.start()
+    assert relay.process_message_id("m1") == "wake-accepted"
+    active = relay.snapshot()["active_lease"]
+    assert relay.snapshot()["state"] == SupervisorState.AGENT_RUNNING and active["process_id"] == 1234
+    relay.write_completion_record(active["lease_id"])
+    assert relay.consume_completion_record()
+    assert relay.snapshot()["state"] == SupervisorState.WAITING_FOR_REPLY and relay.snapshot()["active_lease"] is None
+
+
+def test_restart_with_inflight_lease_fails_closed(tmp_path):
+    class Realish:
+        def validate_target(self, _target): return WakeResult(True, "bound")
+        def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False)
+    relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start()
+    assert relay.process_message_id("m1") == "wake-accepted"
+    restored = Supervisor(config(tmp_path), FakeGmail(), Realish())
+    assert restored.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED
 
 
 def test_malformed_state_and_project_isolation(tmp_path):

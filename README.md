@@ -58,6 +58,12 @@ Staged content is stored as `inbox/RUN-…/STEP-…/message.txt`, `manifest.json
 
 Phase 2 supplies a real `WakeAdapter` that binds to a verified Codex thread/session, a real end-of-lease contract, and optional Chrome/ChatGPT handoff. It must not replace the deterministic protocol, state machine, staging layout, or one-active-lease invariant.
 
+## Phase 2 real-wake configuration
+
+Set `target_type = "codex-cli"`, an exact Codex session UUID in `target_id`, and the local CLI command in `codex_command`. The real adapter uses the official `codex exec resume <session-id>` fallback with Windows no-console flags; launch acceptance becomes `AGENT_RUNNING`, never completion. The bound agent must write the exact lease completion through `agent-relay complete <lease-id>`; an atomic completion record then moves the supervisor to `WAITING_FOR_REPLY`.
+
+An unknown persisted active lease enters `HUMAN_REQUIRED` on restart rather than being awakened again. The ChatGPT URL remains an explicit configuration field; browser handoff is intentionally unavailable unless a separately functional, silent-background-certified adapter is configured.
+
 ---
 
 # Original Gmail Courier

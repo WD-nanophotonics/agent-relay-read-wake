@@ -8,6 +8,7 @@ local_project_storage = "C:/Users/icywo/AppData/Local/AgentRelay/projects/gmail-
 target_type = "mock"
 target_id = ""
 target_label = "Gmail Courier Phase 1 mock"
+codex_command = "codex.cmd"
 chat_url = ""
 poll_interval = 20
 enabled = true

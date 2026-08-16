@@ -27,6 +27,7 @@ class RelayConfig:
     poll_interval: int
     enabled: bool
     gmail_auth_home: Path
+    codex_command: str = "codex.cmd"
 
 
 def config_path(home: Path | None = None) -> Path:
@@ -51,7 +52,10 @@ def load_config(home: Path | None = None) -> RelayConfig:
     if not isinstance(project_id, str) or not project_id or project_id != project_id.lower():
         raise ValueError("project_id must be a non-empty lowercase identifier")
     expand = lambda value: Path(os.path.expandvars(str(value))).expanduser().resolve()
-    return RelayConfig(project_id, str(raw["display_name"]), str(raw["channel_id"]), expand(raw["repo_path"]), expand(raw["local_project_storage"]), str(raw["target_type"]), str(raw.get("target_id", "")), str(raw["target_label"]), str(raw["chat_url"]), interval, bool(raw.get("enabled", True)), expand(raw["gmail_auth_home"]))
+    target_type = str(raw["target_type"])
+    if target_type not in {"mock", "codex-cli"}:
+        raise ValueError("target_type must be mock or codex-cli")
+    return RelayConfig(project_id, str(raw["display_name"]), str(raw["channel_id"]), expand(raw["repo_path"]), expand(raw["local_project_storage"]), target_type, str(raw.get("target_id", "")), str(raw["target_label"]), str(raw["chat_url"]), interval, bool(raw.get("enabled", True)), expand(raw["gmail_auth_home"]), str(raw.get("codex_command", "codex.cmd")))
 
 
 def write_example(path: Path, repo_path: Path) -> None:
