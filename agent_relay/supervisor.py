@@ -241,6 +241,42 @@ class Supervisor:
             self._human_required("malformed-completion-record", active["lease_id"], detail=str(exc))
             return False
 
+    def recover_verified_completion(self, lease_id: str, reason: str) -> bool:
+        """Close one exact lease after an external control-plane bootstrap.
+
+        This is intentionally narrower than normal completion: it requires an
+        exact, already-written WORK receipt plus handoff evidence, records the
+        recovery reason, and never invents an App Server terminal event.
+        """
+        with self.lock:
+            active = self.state.get("active_lease")
+            if self.state.get("state") != SupervisorState.AGENT_RUNNING or not active or active.get("lease_id") != lease_id:
+                return False
+            path = self.completion_path(lease_id)
+            try:
+                import json
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if (
+                    record.get("protocol") != "AGENTRELAY_COMPLETION/1"
+                    or record.get("lease_kind") != LeaseKind.WORK
+                    or record.get("lease_id") != lease_id
+                    or record.get("completion_token") != active.get("completion_token")
+                    or record.get("outcome") != "completed"
+                    or record.get("handoff_succeeded") is not True
+                ):
+                    return False
+                validate_evidence(self.config.local_project_storage, active)
+            except (OSError, ValueError, json.JSONDecodeError):
+                return False
+            active["status"] = LeaseStatus.COMPLETED.value
+            self.state["active_lease"] = None
+            self.state["last"]["last_lease"] = active
+            self.state["last"]["last_agent_completion"] = "completed"
+            self._save()
+            self.ledger.append("RECOVERY_COMPLETION_ACCEPTED", project_id=self.config.project_id, lease_id=lease_id, reason=reason[:500])
+            self._transition(SupervisorState.WAITING_FOR_REPLY, "verified-completion-recovery", lease_id=lease_id)
+            return True
+
     def _error(self, reason: str, detail: str) -> None:
         with self.lock:
             self.state["last_error"] = detail[:500]

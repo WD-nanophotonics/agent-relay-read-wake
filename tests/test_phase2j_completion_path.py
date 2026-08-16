@@ -116,6 +116,16 @@ def test_constructor_recovery_policy_is_explicit(tmp_path):
     assert recovered.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED
 
 
+def test_verified_completion_recovery_never_fabricates_terminal_event(tmp_path):
+    relay, _ = start_active(tmp_path)
+    active = relay.snapshot()["active_lease"]
+    record_handoff_and_receipt(relay)
+    recovered = Supervisor(config(tmp_path), Gateway(), CompletionAdapter())
+    assert recovered.recover_verified_completion(active["lease_id"], "bootstrap-control-path-unavailable")
+    assert recovered.snapshot()["state"] == SupervisorState.WAITING_FOR_REPLY
+    assert recovered.snapshot()["active_lease"] is None
+
+
 def test_terminal_event_is_retained_and_consumed_by_exact_identity(tmp_path):
     controller = AppServerController("codex.cmd", tmp_path, tmp_path / "app.log", "worker")
     controller._handle_server_message({
