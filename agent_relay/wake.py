@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+import secrets
 import subprocess
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -17,6 +18,11 @@ class LeaseStatus(StrEnum):
     ACTIVE = "ACTIVE"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+class LeaseKind(StrEnum):
+    DIAGNOSTIC = "DIAGNOSTIC"
+    WORK = "WORK"
 
 
 @dataclass(frozen=True)
@@ -36,11 +42,14 @@ class WakeLease:
     step: int
     staged_instruction_path: Path
     created_at: str
+    lease_kind: LeaseKind = LeaseKind.WORK
+    completion_token: str = ""
+    worker_id: str = ""
     status: LeaseStatus = LeaseStatus.ACTIVE
 
     @classmethod
-    def create(cls, project_id: str, run_id: str, step: int, path: Path) -> "WakeLease":
-        return cls(str(uuid4()), project_id, run_id, step, path.resolve(), utcnow())
+    def create(cls, project_id: str, run_id: str, step: int, path: Path, lease_kind: LeaseKind = LeaseKind.WORK, worker_id: str = "") -> "WakeLease":
+        return cls(str(uuid4()), project_id, run_id, step, path.resolve(), utcnow(), lease_kind, secrets.token_urlsafe(32), worker_id)
 
 
 @dataclass(frozen=True)
@@ -57,7 +66,9 @@ class WakeAdapter(Protocol):
 
 
 def wake_instruction(lease: WakeLease) -> str:
-    return f"""AGENTRELAY_WAKE/1\n\nProject: {lease.project_id}\nRun: {lease.run_id}\nStep: {lease.step:04d}\nLease: {lease.lease_id}\nStaged instruction: {lease.staged_instruction_path}\n\nRead the authoritative staged instruction and execute exactly one work lease. Test, inspect the diff, commit and push applicable changes, then provide a completion report and deterministic completion signal before yielding. Do not poll Gmail, wait for ChatGPT, retry autonomously, or begin another workflow step without a new supervisor wake.\n"""
+    if lease.lease_kind is LeaseKind.DIAGNOSTIC:
+        return f"""AGENTRELAY_DIAGNOSTIC_WAKE/1\n\nProject: {lease.project_id}\nLease: {lease.lease_id}\nWorker: {lease.worker_id}\nStaged instruction: {lease.staged_instruction_path}\n\nThis is a no-side-effect diagnostic lease. Do not modify repository files, access Gmail or Chrome, commit, push, create another turn, wait, or retry. Verify the identities above, then execute exactly once:\npython -m agent_relay.cli complete-diagnostic --lease-id {lease.lease_id} --completion-token {lease.completion_token}\nAfter the command succeeds, terminate this Codex turn.\n"""
+    return f"""AGENTRELAY_WAKE/1\n\nProject: {lease.project_id}\nRun: {lease.run_id}\nStep: {lease.step:04d}\nLease: {lease.lease_id}\nStaged instruction: {lease.staged_instruction_path}\n\nRead the authoritative staged instruction and execute exactly one work lease. Test, inspect the diff, commit and push applicable changes, then complete the configured ChatGPT handoff before writing a successful completion receipt. Do not poll Gmail, wait for ChatGPT, retry autonomously, or begin another workflow step without a new supervisor wake.\n"""
 
 
 class MockWakeAdapter:
@@ -99,7 +110,7 @@ class CodexCliWakeAdapter:
         if hasattr(subprocess, "STARTUPINFO"):
             startup = subprocess.STARTUPINFO(); startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW; startup.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
-            process = subprocess.Popen([self.command, "exec", "resume", self.target.target_id, instruction], cwd=self.target.repo_path, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, shell=False, creationflags=flags, startupinfo=startup)
+            process = subprocess.Popen([self.command, "exec", "--approve-for-me", "resume", self.target.target_id, instruction], cwd=self.target.repo_path, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, shell=False, creationflags=flags, startupinfo=startup)
         except OSError as exc:
             log.close()
             return WakeResult(False, f"Codex CLI launch failed: {exc}")

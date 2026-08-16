@@ -12,7 +12,7 @@ from .config import RelayConfig
 from .gmail import GmailGateway, GmailMessage
 from .protocol import Disposition, ProtocolError, parse_envelope
 from .storage import Ledger, StateStore, atomic_json, now, read_content_hash, stage_instruction
-from .wake import CodexTarget, LeaseStatus, WakeAdapter, WakeLease, wake_instruction
+from .wake import CodexTarget, LeaseKind, LeaseStatus, WakeAdapter, WakeLease, wake_instruction
 
 
 class SupervisorState(StrEnum):
@@ -120,6 +120,22 @@ class Supervisor:
             else:
                 self._human_required("agent-lease-failed", lease_id=lease_id)
 
+    def fail_active_lease(self, reason: str) -> bool:
+        """Resolve an abandoned lease through the supervisor's audited recovery path."""
+        with self.lock:
+            active = self.state.get("active_lease")
+            if not active:
+                return False
+            lease_id = str(active.get("lease_id", ""))
+            active["status"] = LeaseStatus.FAILED.value
+            self.state["active_lease"] = None
+            self.state["last"]["last_lease"] = active
+            self.state["last"]["last_agent_completion"] = "failed"
+            self._save()
+            self.ledger.append("LEASE_FAILED", project_id=self.config.project_id, lease_id=lease_id, reason=reason[:500])
+            self._human_required("agent-lease-failed", lease_id=lease_id, detail=reason[:500])
+            return True
+
     def poll_once(self) -> None:
         with self.lock:
             if self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY) or self.stop_event.is_set():
@@ -139,13 +155,17 @@ class Supervisor:
     def completion_path(self, lease_id: str) -> Path:
         return self.config.local_project_storage / "completions" / f"{lease_id}.json"
 
-    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "") -> Path:
+    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "", completion_token: str = "", lease_kind: str = "WORK") -> Path:
         if outcome not in {"completed", "failed"}:
             raise ValueError("completion outcome must be completed or failed")
+        active = self.state.get("active_lease")
+        if active and active.get("lease_id") == lease_id:
+            completion_token = completion_token or str(active.get("completion_token", ""))
+            lease_kind = str(active.get("lease_kind", lease_kind))
         target = self.completion_path(lease_id)
-        if outcome == "completed" and not handoff_succeeded:
+        if outcome == "completed" and lease_kind == LeaseKind.WORK and not handoff_succeeded:
             raise RuntimeError("successful lease completion requires verified ChatGPT handoff")
-        atomic_json(target, {"lease_id": lease_id, "outcome": outcome, "handoff_succeeded": handoff_succeeded, "detail": detail[:500], "recorded_at": now()})
+        atomic_json(target, {"protocol": "AGENTRELAY_COMPLETION/1", "lease_id": lease_id, "lease_kind": lease_kind, "completion_token": completion_token, "outcome": outcome, "handoff_succeeded": handoff_succeeded, "detail": detail[:500], "recorded_at": now()})
         return target
 
     def consume_completion_record(self) -> bool:
@@ -160,7 +180,9 @@ class Supervisor:
             record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("lease_id") != active["lease_id"]:
                 raise ValueError("lease ID mismatch")
-            if record.get("outcome") == "completed" and record.get("handoff_succeeded") is not True:
+            if record.get("protocol") != "AGENTRELAY_COMPLETION/1" or record.get("lease_kind") != active.get("lease_kind") or record.get("completion_token") != active.get("completion_token"):
+                raise ValueError("completion receipt identity mismatch")
+            if record.get("outcome") == "completed" and record.get("lease_kind") == LeaseKind.WORK and record.get("handoff_succeeded") is not True:
                 raise ValueError("completion precedes verified handoff")
             self.complete_lease(active["lease_id"], record.get("outcome", "failed"))
             return True
@@ -191,7 +213,7 @@ class Supervisor:
             record["status"] = status.value
         return record
 
-    def process_message_id(self, message_id: str) -> str:
+    def process_message_id(self, message_id: str, lease_kind: LeaseKind = LeaseKind.WORK) -> str:
         with self.lock:
             if self.stop_event.is_set() or self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY):
                 return "stopped"
@@ -250,7 +272,7 @@ class Supervisor:
                 self._transition(SupervisorState.WAITING_FOR_REPLY, "no-action", gmail_message_id=message_id)
                 return "no-action"
             self._transition(SupervisorState.READY_TO_WAKE, "wake-authorized", gmail_message_id=message_id)
-            lease = WakeLease.create(self.config.project_id, envelope.run_id, envelope.step, staged)
+            lease = WakeLease.create(self.config.project_id, envelope.run_id, envelope.step, staged, lease_kind, self.config.target_id)
             self.state["active_lease"] = self._lease_record(lease); self._save()
             self.ledger.append("WAKE_AUTHORIZED", project_id=self.config.project_id, gmail_message_id=message_id, run_id=envelope.run_id, step_id=envelope.step, lease_id=lease.lease_id)
             self._transition(SupervisorState.WAKING, "adapter-invocation", lease_id=lease.lease_id)
@@ -273,3 +295,11 @@ class Supervisor:
             self.ledger.append("WAKE_FAILED", project_id=self.config.project_id, lease_id=lease.lease_id, reason=result.detail[:500])
             self._human_required("wake-failed", message_id, lease_id=lease.lease_id)
             return "wake-failed"
+
+
+def write_completion_receipt(project_storage: Path, lease_id: str, completion_token: str, lease_kind: str = "DIAGNOSTIC") -> Path:
+    if lease_kind != LeaseKind.DIAGNOSTIC:
+        raise ValueError("complete-diagnostic only accepts DIAGNOSTIC leases")
+    target = project_storage / "completions" / f"{lease_id}.json"
+    atomic_json(target, {"protocol": "AGENTRELAY_COMPLETION/1", "lease_id": lease_id, "lease_kind": lease_kind, "completion_token": completion_token, "outcome": "completed", "handoff_succeeded": False, "recorded_at": now()})
+    return target

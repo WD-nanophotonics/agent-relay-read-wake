@@ -60,7 +60,9 @@ Phase 2 supplies a real `WakeAdapter` that binds to a verified Codex thread/sess
 
 ## Phase 2 real-wake configuration
 
-Set `target_type = "codex-cli"`, an exact Codex session UUID in `target_id`, and the local CLI command in `codex_command`. The real adapter uses the official `codex exec resume <session-id>` fallback with Windows no-console flags; launch acceptance becomes `AGENT_RUNNING`, never completion. The bound agent must write the exact lease completion through `agent-relay complete <lease-id>`; an atomic completion record then moves the supervisor to `WAITING_FOR_REPLY`.
+Set `target_type = "codex-cli"`, an exact Codex session UUID in `target_id`, and the local CLI command in `codex_command`. The real adapter uses the official `codex exec resume <session-id>` fallback with Windows no-console flags; launch acceptance becomes `AGENT_RUNNING`, never completion. Each lease carries an unpredictable completion token and a `WORK` or `DIAGNOSTIC` kind. Work completion requires explicit handoff evidence; bounded diagnostics may complete without ChatGPT via `agent-relay complete-diagnostic --lease-id <id> --completion-token <token>`. The supervisor validates protocol, kind, lease ID, and token before an atomic completion record can move it to `WAITING_FOR_REPLY`.
+
+`scripts/phase2d_diagnostic.py` is a one-message, bounded diagnostic harness for the configured worker. It does not authorize a second wake after a timeout. An abandoned lease is resolved through the audited supervisor recovery path and remains `HUMAN_REQUIRED`.
 
 An unknown persisted active lease enters `HUMAN_REQUIRED` on restart rather than being awakened again. The ChatGPT URL remains an explicit configuration field; browser handoff is intentionally unavailable unless a separately functional, silent-background-certified adapter is configured.
 

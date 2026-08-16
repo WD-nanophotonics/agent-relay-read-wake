@@ -9,8 +9,8 @@ import pytest
 from agent_relay.config import RelayConfig
 from agent_relay.gmail import Attachment, GmailMessage
 from agent_relay.protocol import Disposition, ProtocolError, parse_envelope
-from agent_relay.supervisor import Supervisor, SupervisorState
-from agent_relay.wake import MockWakeAdapter, WakeResult
+from agent_relay.supervisor import Supervisor, SupervisorState, write_completion_receipt
+from agent_relay.wake import LeaseKind, MockWakeAdapter, WakeResult
 
 
 def envelope(*, channel="AR-GMAILCOURIER-A1R7P", run="RUN-20260816-001", step=1, parent=0, disposition="WAKE", project="gmail-courier"):
@@ -117,6 +117,8 @@ def test_restart_with_inflight_lease_fails_closed(tmp_path):
     assert relay.process_message_id("m1") == "wake-accepted"
     restored = Supervisor(config(tmp_path), FakeGmail(), Realish())
     assert restored.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED
+    assert restored.fail_active_lease("worker outcome unavailable")
+    assert restored.snapshot()["active_lease"] is None and restored.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED
 
 
 def test_completion_requires_handoff_evidence(tmp_path):
@@ -126,6 +128,19 @@ def test_completion_requires_handoff_evidence(tmp_path):
     relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start(); relay.process_message_id("m1")
     with pytest.raises(RuntimeError, match="handoff"):
         relay.write_completion_record(relay.snapshot()["active_lease"]["lease_id"])
+
+
+def test_diagnostic_completion_requires_exact_token_and_kind(tmp_path):
+    class Realish:
+        def validate_target(self, _target): return WakeResult(True, "bound")
+        def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False)
+    relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start()
+    assert relay.process_message_id("m1", LeaseKind.DIAGNOSTIC) == "wake-accepted"
+    active = relay.snapshot()["active_lease"]
+    assert active["lease_kind"] == LeaseKind.DIAGNOSTIC and active["completion_token"]
+    write_completion_receipt(config(tmp_path).local_project_storage, active["lease_id"], active["completion_token"])
+    assert relay.consume_completion_record()
+    assert relay.snapshot()["state"] == SupervisorState.WAITING_FOR_REPLY
 
 
 def test_self_recursion_target_is_rejected(tmp_path):

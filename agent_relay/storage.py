@@ -67,7 +67,13 @@ def stage_instruction(project_root: Path, message: Any, envelope: ProtocolEnvelo
     """Atomically stage a downloaded Gmail message and its attachments."""
     inbox = project_root / "inbox" / envelope.run_id / f"STEP-{envelope.step:04d}"
     if inbox.exists():
-        raise FileExistsError(f"instruction path already exists: {inbox}")
+        try:
+            existing = json.loads((inbox / "manifest.json").read_text(encoding="utf-8"))
+            if existing.get("gmail_message_id") == message.message_id and existing.get("protocol", {}).get("run_id") == envelope.run_id and existing.get("protocol", {}).get("step") == envelope.step:
+                return inbox
+        except (OSError, json.JSONDecodeError):
+            pass
+        raise FileExistsError(f"instruction path already exists for a different instruction: {inbox}")
     project_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="stage-", dir=project_root) as temp_root:
         temp = Path(temp_root) / "instruction"
