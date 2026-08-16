@@ -16,7 +16,7 @@ Gmail -> deterministic AGENTRELAY/1 parser -> atomic project inbox staging
 
 The desktop UI starts in `STOPPED`. Only **Start** enables polling. **Stop** immediately blocks new Gmail processing, attachment staging, and wake attempts; closing the window also stops monitoring. The UI exposes status, project/target binding, run/step, last events, and safe Gmail/mock-wake diagnostics.
 
-States are `STOPPED`, `MONITORING`, `STAGING`, `READY_TO_WAKE`, `WAKING`, `AGENT_RUNNING`, `WAITING_FOR_REPLY`, `HUMAN_REQUIRED`, and `ERROR`. Invalid, future, or conflicting messages fail closed and never wake an agent.
+States are `STOPPED`, `MONITORING`, `STAGING`, `READY_TO_WAKE`, `WAKING`, `AGENT_RUNNING`, `DRAINING`, `WAITING_FOR_REPLY`, `HUMAN_REQUIRED`, and `ERROR`. Invalid, future, or conflicting messages fail closed and never wake an agent.
 
 ## Configure and run
 
@@ -124,6 +124,12 @@ consumed only by the matching lease. After a verified WORK handoff, the
 Supervisor may issue one bounded `turn/interrupt` for the exact owned turn;
 the real terminal event is still required and no completion event is
 fabricated. A cleanup interrupt does not undo logical WORK completion.
+
+Logical completion enters `DRAINING` until the exact prior worker/turn
+transport is quiescent. Gmail is not polled in this state, so a valid next
+WAKE remains in Gmail and is deferred rather than consumed or classified as
+human-required. Once cleanup is verified, the supervisor enters
+`WAITING_FOR_REPLY` and the ordinary poller continues automatically.
 
 If the local test runner is unstable on Windows, use compileall and the
 standalone deterministic checks first; pytest remains the intended project

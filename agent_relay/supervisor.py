@@ -24,6 +24,7 @@ class SupervisorState(StrEnum):
     READY_TO_WAKE = "READY_TO_WAKE"
     WAKING = "WAKING"
     AGENT_RUNNING = "AGENT_RUNNING"
+    DRAINING = "DRAINING"
     WAITING_FOR_REPLY = "WAITING_FOR_REPLY"
     HUMAN_REQUIRED = "HUMAN_REQUIRED"
     ERROR = "ERROR"
@@ -124,7 +125,7 @@ class Supervisor:
         """Deterministic local completion callback; exact active lease ID is required."""
         with self.lock:
             active = self.state.get("active_lease")
-            if not active or active.get("lease_id") != lease_id or self.state["state"] != SupervisorState.AGENT_RUNNING:
+            if not active or active.get("lease_id") != lease_id or self.state["state"] not in (SupervisorState.AGENT_RUNNING, SupervisorState.DRAINING):
                 raise RuntimeError("completion does not match the active running lease")
             active["status"] = LeaseStatus.COMPLETED.value if outcome == "completed" else LeaseStatus.FAILED.value
             self.state["active_lease"] = None
@@ -157,9 +158,9 @@ class Supervisor:
         with self.lock:
             if self.stop_event.is_set():
                 return
-            if self.state["state"] == SupervisorState.AGENT_RUNNING:
+            if self.state["state"] in (SupervisorState.AGENT_RUNNING, SupervisorState.DRAINING):
                 self.consume_completion_record()
-                if self.state["state"] == SupervisorState.AGENT_RUNNING:
+                if self.state["state"] in (SupervisorState.AGENT_RUNNING, SupervisorState.DRAINING):
                     return
             if self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY):
                 return
@@ -201,7 +202,7 @@ class Supervisor:
 
     def consume_completion_record(self) -> bool:
         active = self.state.get("active_lease")
-        if not active or self.state["state"] != SupervisorState.AGENT_RUNNING:
+        if not active or self.state["state"] not in (SupervisorState.AGENT_RUNNING, SupervisorState.DRAINING):
             return False
         path = self.completion_path(active["lease_id"])
         if not path.exists():
@@ -217,24 +218,23 @@ class Supervisor:
                 if record.get("handoff_succeeded") is not True:
                     raise ValueError("completion precedes verified handoff")
                 validate_evidence(self.config.local_project_storage, active)
+            lease = WakeLease(
+                str(active["lease_id"]), str(active["project_id"]), str(active["run_id"]), int(active["step"]),
+                Path(str(active["staged_instruction_path"])), str(active["created_at"]),
+                LeaseKind(str(active.get("lease_kind", LeaseKind.WORK))), str(active.get("completion_token", "")),
+                str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))), str(active.get("handoff_token", "")), str(active.get("turn_id", "")),
+            )
+            if self.state["state"] == SupervisorState.AGENT_RUNNING:
+                self._transition(SupervisorState.DRAINING, "logical-completion-verified", lease_id=active["lease_id"])
             turn_completed = getattr(self.wake_adapter, "turn_completed", None)
-            if turn_completed is not None:
-                lease = WakeLease(
-                    str(active["lease_id"]), str(active["project_id"]), str(active["run_id"]), int(active["step"]),
-                    Path(str(active["staged_instruction_path"])), str(active["created_at"]),
-                    LeaseKind(str(active.get("lease_kind", LeaseKind.WORK))), str(active.get("completion_token", "")),
-                    str(active.get("worker_id", "")), LeaseStatus(str(active.get("status", LeaseStatus.ACTIVE))), str(active.get("handoff_token", "")), str(active.get("turn_id", "")),
-                )
-                if not turn_completed(lease):
-                    interrupt_once = getattr(self.wake_adapter, "interrupt_turn_once", None)
-                    if interrupt_once is not None and interrupt_once(lease):
-                        if not turn_completed(lease):
-                            return False
-                    else:
-                        detail = getattr(self.wake_adapter, "last_error", None)
-                        if detail:
-                            self._human_required("app-server-lifecycle-failed", lease_id=active["lease_id"], detail=detail)
-                        return False
+            if turn_completed is not None and not turn_completed(lease):
+                interrupt_once = getattr(self.wake_adapter, "interrupt_turn_once", None)
+                if interrupt_once is not None:
+                    interrupt_once(lease)
+                return False
+            quiescent = getattr(self.wake_adapter, "transport_quiescent", None)
+            if quiescent is not None and not quiescent(lease):
+                return False
             self.complete_lease(active["lease_id"], record.get("outcome", "failed"))
             return True
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -302,7 +302,12 @@ class Supervisor:
 
     def process_message_id(self, message_id: str, lease_kind: LeaseKind = LeaseKind.WORK) -> str:
         with self.lock:
-            if self.stop_event.is_set() or self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY):
+            if self.stop_event.is_set():
+                return "stopped"
+            if self.state["state"] == SupervisorState.DRAINING:
+                self.ledger.append("MESSAGE_DEFERRED", project_id=self.config.project_id, gmail_message_id=message_id, reason="transport-draining")
+                return "deferred"
+            if self.state["state"] not in (SupervisorState.MONITORING, SupervisorState.WAITING_FOR_REPLY):
                 return "stopped"
             if message_id in self.state["consumed_message_ids"]:
                 self.ledger.append("DUPLICATE_IGNORED", project_id=self.config.project_id, gmail_message_id=message_id, reason="already-consumed")

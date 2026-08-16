@@ -287,6 +287,17 @@ class CodexAppServerWakeAdapter:
             self.last_error = str(exc)
             return False
 
+    def transport_quiescent(self, lease: WakeLease) -> bool:
+        """Confirm the exact owned turn is terminal and the worker is idle."""
+        if not self.controller or lease.worker_id != self.worker_id:
+            return False
+        return bool(
+            self.controller.alive
+            and self.worker_status == "idle"
+            and self.last_turn_status in {"completed", "interrupted", "failed"}
+            and str(lease.turn_id or self.last_turn_id or "") == str(self.last_turn_id or "")
+        )
+
     def interrupt_turn_once(self, lease: WakeLease) -> bool:
         """Request bounded cleanup for one exact post-handoff turn at most once."""
         if not self.controller or lease.worker_id != self.worker_id or not lease.turn_id:

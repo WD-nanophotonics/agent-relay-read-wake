@@ -54,6 +54,18 @@ controller then waits for the real terminal event and never fabricates one.
 The interrupt is cleanup of a logically completed WORK lease, not a second
 work attempt.
 
+## Pre-endurance transport draining
+
+Logical completion and physical transport termination are separate facts.
+After an exact receipt and handoff are verified, the lease enters the
+persisted `DRAINING` state. The supervisor does not poll Gmail or consume a
+next message until the exact prior worker/turn is terminal, any bounded
+interrupt has been issued at most once, and the owned transport reports
+quiescence. A valid next WAKE therefore remains deferred in Gmail; it is not
+lost and is never escalated as `HUMAN_REQUIRED` merely because transports
+overlap. After quiescence, the supervisor transitions to `WAITING_FOR_REPLY`
+and the normal poller continues the validated next work automatically.
+
 ## Future integration points
 
 - `agent_relay.wake.WakeAdapter`: verified App Server wake and lease acceptance;
