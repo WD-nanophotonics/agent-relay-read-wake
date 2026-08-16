@@ -55,7 +55,7 @@ def main() -> int:
         result = relay.process_message_id(MESSAGE_ID, LeaseKind.DIAGNOSTIC)
         snap = relay.snapshot()
         lease = snap.get("active_lease") or {}
-        evidence.update({"wake_result": result, "state_after_wake": snap["state"], "lease_id": lease.get("lease_id"), "turn_id": lease.get("turn_id"), "staged_instruction_path": lease.get("staged_instruction_path")})
+        evidence.update({"wake_result": result, "adapter_error": adapter.last_error, "worker_status_after_wake": adapter.worker_status, "state_after_wake": snap["state"], "lease_id": lease.get("lease_id"), "turn_id": lease.get("turn_id"), "staged_instruction_path": lease.get("staged_instruction_path")})
         print(json.dumps(evidence, ensure_ascii=False), flush=True)
         if result != "wake-accepted":
             return 2
