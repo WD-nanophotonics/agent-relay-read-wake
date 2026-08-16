@@ -112,23 +112,20 @@ class RunnerOwnership:
 
 def _pid_alive(pid: int) -> bool:
     if pid <= 0: return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except SystemError:
-        # On some Windows/Python combinations os.kill(pid, 0) raises a
-        # SystemError even for a live process. Query the process handle
-        # directly before declaring an owned runner stale.
-        if os.name != "nt":
-            return False
+    if os.name == "nt":
         try:
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
             if handle:
                 kernel32.CloseHandle(handle)
                 return True
+            return False
         except (AttributeError, OSError):
-            pass
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except SystemError:
         return False
     except (OSError, PermissionError):
         return False
