@@ -1,4 +1,66 @@
-# Gmail Courier
+# AgentRelay Read & Wake Supervisor (Phase 1)
+
+This repository contains two deliberately separate local tools:
+
+- `gmail-courier`: the original attachment courier and Gmail/OAuth reference implementation.
+- `agent-relay`: a deterministic **Read & Wake Supervisor** for one configured Codex project.
+
+AgentRelay is not an AI agent, does not run Codex continuously, does not poll Gmail through Codex, and does not automate Chrome. **AI never waits; software waits.** Gmail polling and wake authorization are ordinary, auditable software decisions.
+
+## Phase 1 architecture
+
+```text
+Gmail -> deterministic AGENTRELAY/1 parser -> atomic project inbox staging
+      -> persistent state + JSONL audit ledger -> one mock Codex work lease
+```
+
+The desktop UI starts in `STOPPED`. Only **Start** enables polling. **Stop** immediately blocks new Gmail processing, attachment staging, and wake attempts; closing the window also stops monitoring. The UI exposes status, project/target binding, run/step, last events, and safe Gmail/mock-wake diagnostics.
+
+States are `STOPPED`, `MONITORING`, `STAGING`, `READY_TO_WAKE`, `WAKING`, `AGENT_RUNNING`, `WAITING_FOR_REPLY`, `HUMAN_REQUIRED`, and `ERROR`. Invalid, future, or conflicting messages fail closed and never wake an agent.
+
+## Configure and run
+
+Install as usual, then create the local configuration:
+
+```powershell
+python -m pip install -e ".[dev]"
+agent-relay init
+notepad "$env:LOCALAPPDATA\AgentRelay\agentrelay.toml"
+agent-relay ui
+```
+
+`agentrelay.example.toml` is a checked-in, credential-free example. It configures one project (`gmail-courier`) and its isolated runtime storage at `%LOCALAPPDATA%\AgentRelay\projects\gmail-courier`. AgentRelay reuses the existing Gmail Courier OAuth token from `%LOCALAPPDATA%\GmailCourier` by default. Do not commit OAuth clients, `token.json`, inbox contents, state, or logs.
+
+`Test Gmail` validates authentication/connection only. `Test Wake` remains mock-only in Phase 1. The mock never starts Codex or a browser.
+
+## Gmail protocol
+
+The first block of a message body must be exactly versioned and machine-readable:
+
+```text
+AGENTRELAY/1
+
+CHANNEL: AR-GMAILCOURIER-A1R7P
+RUN: RUN-20260816-001
+STEP: 0001
+PARENT: 0000
+DISPOSITION: WAKE
+PROJECT: gmail-courier
+
+Human task content follows here.
+```
+
+Supported dispositions are `WAKE`, `HUMAN_REQUIRED`, and `NO_ACTION`. A wake requires a matching project/channel, supported protocol, new Gmail ID, expected run/step/parent, successful atomic staging, and no active lease. Duplicate IDs and old steps are ignored; a future step or conflicting content for an already known logical step enters `HUMAN_REQUIRED`.
+
+Staged content is stored as `inbox/RUN-…/STEP-…/message.txt`, `manifest.json`, and `attachments/`. The manifest records Gmail identity, protocol fields, timestamps, metadata, and hashes. `ledger/events.jsonl` is append-oriented and excludes credentials.
+
+## Phase 2 boundary
+
+Phase 2 supplies a real `WakeAdapter` that binds to a verified Codex thread/session, a real end-of-lease contract, and optional Chrome/ChatGPT handoff. It must not replace the deterministic protocol, state machine, staging layout, or one-active-lease invariant.
+
+---
+
+# Original Gmail Courier
 
 Gmail Courier is a local, one-process attachment courier. It reads messages
 sent to the configured Gmail account, routes them by project code, writes

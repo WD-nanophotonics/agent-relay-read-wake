@@ -8,3 +8,8 @@ build/
 dist/
 .coverage
 htmlcov/
+# AgentRelay runtime data and local configuration
+agentrelay.toml
+data/
+runtime/
+*.tmp

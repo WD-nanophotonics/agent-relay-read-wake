@@ -1,0 +1,14 @@
+# Copy to %LOCALAPPDATA%/AgentRelay/agentrelay.toml; this contains no credentials.
+[project]
+project_id = "gmail-courier"
+display_name = "Gmail Courier"
+channel_id = "AR-GMAILCOURIER-A1R7P"
+repo_path = "C:/Users/icywo/PycharmProjects/GmailCourier"
+local_project_storage = "C:/Users/icywo/AppData/Local/AgentRelay/projects/gmail-courier"
+target_type = "mock"
+target_id = ""
+target_label = "Gmail Courier Phase 1 mock"
+chat_url = ""
+poll_interval = 20
+enabled = true
+gmail_auth_home = "C:/Users/icywo/AppData/Local/GmailCourier"
