@@ -38,6 +38,9 @@ class FakeController:
     def start(self): self.initialized = True; return {"pid": self.pid}
     def stop(self): self.stopped = True; self.initialized = False
     def find_worker(self, worker_id=None): return AppServerThread(worker_id or self.worker_id, "idle", {})
+    def start_worker(self):
+        self.worker_id = "owned-worker"
+        return AppServerThread(self.worker_id, "idle", {})
     def start_turn(self, worker_id, instruction, roots):
         self.turns.append((worker_id, instruction, roots))
         from agent_relay.app_server import AppServerTurn
