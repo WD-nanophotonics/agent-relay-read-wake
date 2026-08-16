@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import app_home, config_path, load_config, write_example
+from .config import app_home, config_path, load_config, save_binding, write_example
 from .gmail import GoogleGmailGateway
 from .supervisor import Supervisor
 from .ui import RelayApp
@@ -12,8 +12,12 @@ from .wake import CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "ui", "complete"), nargs="?", default="ui")
+    parser.add_argument("command", choices=("init", "ui", "complete", "bind"), nargs="?", default="ui")
     parser.add_argument("lease_id", nargs="?")
+    parser.add_argument("--target-id")
+    parser.add_argument("--target-type", default="codex-cli")
+    parser.add_argument("--chat-url")
+    parser.add_argument("--handoff-succeeded", action="store_true")
     args = parser.parse_args(argv)
     home = app_home()
     if args.command == "init":
@@ -22,12 +26,17 @@ def main(argv=None) -> int:
         else:
             home.mkdir(parents=True, exist_ok=True); write_example(path, Path.cwd()); print(f"CREATED {path}")
         return 0
+    if args.command == "bind":
+        if not args.target_id:
+            parser.error("bind requires --target-id")
+        print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type, chat_url=args.chat_url or 'https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9')}")
+        return 0
     config = load_config(home)
     if args.command == "complete":
         if not args.lease_id:
             parser.error("complete requires a lease_id")
         relay = Supervisor(config, None, MockWakeAdapter())
-        relay.write_completion_record(args.lease_id)
+        relay.write_completion_record(args.lease_id, handoff_succeeded=args.handoff_succeeded)
         print("COMPLETION_RECORDED")
         return 0
     target = CodexTarget(config.target_type, config.target_id, config.target_label, config.repo_path)

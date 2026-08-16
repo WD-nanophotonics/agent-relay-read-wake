@@ -104,7 +104,7 @@ def test_real_wake_acceptance_keeps_lease_running_until_completion_record(tmp_pa
     assert relay.process_message_id("m1") == "wake-accepted"
     active = relay.snapshot()["active_lease"]
     assert relay.snapshot()["state"] == SupervisorState.AGENT_RUNNING and active["process_id"] == 1234
-    relay.write_completion_record(active["lease_id"])
+    relay.write_completion_record(active["lease_id"], handoff_succeeded=True)
     assert relay.consume_completion_record()
     assert relay.snapshot()["state"] == SupervisorState.WAITING_FOR_REPLY and relay.snapshot()["active_lease"] is None
 
@@ -117,6 +117,15 @@ def test_restart_with_inflight_lease_fails_closed(tmp_path):
     assert relay.process_message_id("m1") == "wake-accepted"
     restored = Supervisor(config(tmp_path), FakeGmail(), Realish())
     assert restored.snapshot()["state"] == SupervisorState.HUMAN_REQUIRED
+
+
+def test_completion_requires_handoff_evidence(tmp_path):
+    class Realish:
+        def validate_target(self, _target): return WakeResult(True, "bound")
+        def wake(self, _lease, _instruction): return WakeResult(True, "accepted", completed=False)
+    relay = Supervisor(config(tmp_path), FakeGmail([message()]), Realish()); relay.start(); relay.process_message_id("m1")
+    with pytest.raises(RuntimeError, match="handoff"):
+        relay.write_completion_record(relay.snapshot()["active_lease"]["lease_id"])
 
 
 def test_malformed_state_and_project_isolation(tmp_path):

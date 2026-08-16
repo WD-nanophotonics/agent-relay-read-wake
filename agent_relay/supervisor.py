@@ -136,11 +136,13 @@ class Supervisor:
     def completion_path(self, lease_id: str) -> Path:
         return self.config.local_project_storage / "completions" / f"{lease_id}.json"
 
-    def write_completion_record(self, lease_id: str, outcome: str = "completed") -> Path:
+    def write_completion_record(self, lease_id: str, outcome: str = "completed", handoff_succeeded: bool = False, detail: str = "") -> Path:
         if outcome not in {"completed", "failed"}:
             raise ValueError("completion outcome must be completed or failed")
         target = self.completion_path(lease_id)
-        atomic_json(target, {"lease_id": lease_id, "outcome": outcome, "recorded_at": now()})
+        if outcome == "completed" and not handoff_succeeded:
+            raise RuntimeError("successful lease completion requires verified ChatGPT handoff")
+        atomic_json(target, {"lease_id": lease_id, "outcome": outcome, "handoff_succeeded": handoff_succeeded, "detail": detail[:500], "recorded_at": now()})
         return target
 
     def consume_completion_record(self) -> bool:
@@ -155,6 +157,8 @@ class Supervisor:
             record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("lease_id") != active["lease_id"]:
                 raise ValueError("lease ID mismatch")
+            if record.get("outcome") == "completed" and record.get("handoff_succeeded") is not True:
+                raise ValueError("completion precedes verified handoff")
             self.complete_lease(active["lease_id"], record.get("outcome", "failed"))
             return True
         except (OSError, ValueError, json.JSONDecodeError) as exc:
