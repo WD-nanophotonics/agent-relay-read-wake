@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from threading import Event
+from threading import Event, Thread
 import uuid
 
 from .config import RelayConfig
@@ -172,6 +172,7 @@ class BackgroundRunner:
             self.relay.start()
             self.owner.update(state="RUNNING", supervisor_state=self.relay.snapshot().get("state"), backend_pid=getattr(getattr(self.adapter, "controller", None), "pid", None), worker_id=getattr(self.adapter, "worker_id", ""), worker_status=getattr(self.adapter, "worker_status", "unknown"))
             last_poll = 0.0
+            poll_thread: Thread | None = None
             while not self.stop_event.is_set():
                 if self.owner.stop_requested():
                     if self.relay.snapshot().get("active_lease"):
@@ -183,8 +184,12 @@ class BackgroundRunner:
                         self.relay.stop()
                         break
                 current_time = time.monotonic()
-                if current_time - last_poll >= self.config.poll_interval:
-                    self.relay.poll_once()
+                if current_time - last_poll >= self.config.poll_interval and (poll_thread is None or not poll_thread.is_alive()):
+                    # Gmail I/O is allowed to block independently; the
+                    # supervisor heartbeat must remain observable even when a
+                    # provider request is slow or temporarily unavailable.
+                    poll_thread = Thread(target=self.relay.poll_once, name="agent-relay-gmail-poll", daemon=True)
+                    poll_thread.start()
                     last_poll = current_time
                 snap = self.relay.snapshot()
                 owner_state = "ACTIVE_LEASE" if self.owner.stop_requested() and snap.get("active_lease") else "RUNNING"

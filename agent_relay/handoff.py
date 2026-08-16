@@ -11,8 +11,10 @@ from .storage import atomic_json, now
 PROTOCOL = "AGENTRELAY_HANDOFF/1"
 
 
-def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str) -> str:
+def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None) -> str:
     """Build the deterministic Phase 2I return-path message."""
+    next_step = step + 1 if next_step is None else next_step
+    next_parent = step if next_parent is None else next_parent
     return "\n".join([
         "AGENTRELAY_CHATGPT_HANDOFF/1",
         "",
@@ -37,8 +39,8 @@ def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_
         f"SUGGESTED_NEXT_BOUNDARY: {next_boundary}",
         "",
         "ACTION_REQUIRED: AUDIT_REMOTE_AND_SEND_NEXT_GMAIL",
-        "NEXT_STEP: 0010",
-        "NEXT_PARENT: 0009",
+        f"NEXT_STEP: {next_step:04d}",
+        f"NEXT_PARENT: {next_parent:04d}",
         "",
         "CHATGPT MUST:",
         "1. Audit the remote GitHub result before deciding the next task.",
