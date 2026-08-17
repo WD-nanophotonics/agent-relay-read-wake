@@ -8,7 +8,7 @@ import os
 
 from .handoff import build_actionable_report, ACTION_SEND_RECOVERY
 from .ownership import exact_owner_live
-from .storage import atomic_json, now
+from .storage import atomic_json, now, StateStore, Ledger
 
 
 OPEN = "OPEN"
@@ -158,6 +158,16 @@ def recover_pending_handoffs_once(config: Any, *, sender: Any | None = None) -> 
         owner = {"worker_id": worker_id, "pid": value.get("worker_pid"), "exe": value.get("worker_exe")}
         if owner.get("pid") and exact_owner_live(owner):
             continue
+        # A claimed Worker can die after the cursor has advanced but before
+        # its finally block clears active_worker.  Once exact ownership is
+        # proven dead, release only that exact owner so the next bounded poll
+        # is not permanently stuck in BUSY.
+        state_store = StateStore(root)
+        state = state_store.load()
+        if isinstance(state.get("active_worker"), dict) and state["active_worker"].get("worker_id") == worker_id:
+            state.update({"active_worker": None, "mode": "IDLE"})
+            state_store.save(state)
+            Ledger(root).append("stale_active_owner_cleared", worker_id=worker_id, pid=owner.get("pid"))
         if not value.get("report"):
             detail = "worker terminated before terminal outcome was observed"
             report = build_actionable_report(
