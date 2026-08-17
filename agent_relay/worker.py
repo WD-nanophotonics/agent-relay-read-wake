@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Callable
+from uuid import uuid4
+
+from .handoff import build_actionable_report
+from .relay import _owner_live
+from .storage import Ledger, StateStore, atomic_json, now
+
+
+@dataclass(frozen=True)
+class WorkerOutcome:
+    ok: bool
+    detail: str
+
+
+class OneShotWorker:
+    """Own exactly one staged task and terminate after one bounded execution."""
+
+    def __init__(self, config, *, executor: Callable[[str, Path], WorkerOutcome] | None = None, watchdog_spawn: Callable[[int, str], None] | None = None):
+        self.config = config
+        self.store = StateStore(config.local_project_storage)
+        self.ledger = Ledger(config.local_project_storage)
+        self.executor = executor or self._subprocess_executor
+        self.watchdog_spawn = watchdog_spawn
+
+    def claim(self, *, run_id: str, step: int, staged_path: Path, worker_id: str | None = None) -> dict:
+        state = self.store.load()
+        if state.get("stop_requested"):
+            raise RuntimeError("relay is stopped")
+        existing = state.get("active_worker")
+        if existing and _owner_live(existing):
+            if not (worker_id and existing.get("worker_id") == worker_id and existing.get("pid") == os.getpid()):
+                raise RuntimeError("another worker owns the project")
+        owner = {"worker_id": worker_id or str(uuid4()), "pid": os.getpid(), "project_id": self.config.project_id, "run_id": run_id, "step": step, "started_at": now(), "exe": Path(sys.executable).name}
+        state.update({"mode": "BUSY", "active_worker": owner, "last_error": None})
+        self.store.save(state)
+        self.ledger.append("worker_claimed", worker_id=owner["worker_id"], run_id=run_id, step=step)
+        return owner
+
+    def run(self, *, run_id: str, step: int, staged_path: Path, worker_id: str | None = None) -> WorkerOutcome:
+        owner = self.claim(run_id=run_id, step=step, staged_path=staged_path, worker_id=worker_id)
+        outcome = WorkerOutcome(False, "worker did not complete")
+        try:
+            instruction = (staged_path / "message.txt").read_text(encoding="utf-8")
+            outcome = self.executor(instruction, self.config.repo_path)
+            if not outcome.ok:
+                raise RuntimeError(outcome.detail)
+            self._write_handoff(run_id, step, owner, outcome.detail)
+            self.ledger.append("worker_completed", worker_id=owner["worker_id"], step=step)
+            if self.watchdog_spawn:
+                self.watchdog_spawn(step, run_id)
+            return outcome
+        except Exception as exc:
+            outcome = WorkerOutcome(False, f"{type(exc).__name__}: {exc}")
+            state = self.store.load()
+            state["last_error"] = outcome.detail
+            self.store.save(state)
+            self.ledger.append("worker_failed", worker_id=owner["worker_id"], step=step, reason=type(exc).__name__)
+            return outcome
+        finally:
+            state = self.store.load()
+            if state.get("active_worker", {}).get("worker_id") == owner["worker_id"]:
+                state.update({"active_worker": None, "mode": "IDLE" if not state.get("stop_requested") else "STOPPED"})
+                self.store.save(state)
+                self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
+
+    def _subprocess_executor(self, instruction: str, repo_path: Path) -> WorkerOutcome:
+        command = getattr(self.config, "codex_command", "codex.cmd")
+        prompt = instruction + "\n\nBounded worker contract: complete this task, run the requested checks, commit and push, verify HEAD equals origin/main, then return a concise report. Do not wait for Gmail or ChatGPT."
+        try:
+            result = subprocess.run([command, "exec", "--full-auto", prompt], cwd=repo_path, text=True, capture_output=True, timeout=3600, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return WorkerOutcome(False, type(exc).__name__)
+        detail = (result.stdout or result.stderr or "").strip()[-4000:]
+        return WorkerOutcome(result.returncode == 0, detail)
+
+    def _write_handoff(self, run_id: str, step: int, owner: dict, detail: str) -> Path:
+        report = build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id, channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], repository=str(self.config.repo_path), branch="main", baseline_sha="", remote_head="", tests="worker-reported", summary=detail or "bounded worker completed", blockers="none", next_boundary="audit remote and send next Gmail")
+        target = self.config.local_project_storage / "handoffs" / f"{owner['worker_id']}.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(report, encoding="utf-8")
+        return target
+
+
+class ProcessWorkerLauncher:
+    """Launch one detached worker process; the worker owns its own exact PID."""
+
+    def __init__(self, python: str | None = None):
+        self.python = python or sys.executable
+
+    def launch(self, *, staged_path: Path, envelope, content_hash: str) -> dict:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        worker_id = str(uuid4())
+        process = subprocess.Popen([self.python, "-m", "agent_relay.cli", "worker", "--run", envelope.run_id, "--step", str(envelope.step), "--staged", str(staged_path), "--worker-id", worker_id], cwd=Path.cwd(), creationflags=flags, close_fds=True)
+        return {"worker_id": worker_id, "pid": process.pid, "project_id": envelope.project_id, "run_id": envelope.run_id, "step": envelope.step, "started_at": now(), "exe": Path(self.python).name}

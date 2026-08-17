@@ -1,115 +1,86 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
-import time
 
 from .config import app_home, config_path, load_config, save_binding, write_example
 from .gmail import GoogleGmailGateway
-from .handoff import write_evidence
-from .supervisor import Supervisor, write_completion_receipt, write_work_completion_receipt
-from .runner import BackgroundRunner, runner_status, start_background, stop_background
-from .ui import RelayApp
-from .wake import CodexAppServerWakeAdapter, CodexCliWakeAdapter, CodexTarget, MockWakeAdapter
+from .relay import NoopWorkerLauncher, Relay
+from .storage import StateStore
+from .watchdog import run_watchdog
+from .worker import OneShotWorker, ProcessWorkerLauncher
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "ui", "run", "run-background-worker", "start-background", "stop-background", "status", "complete", "complete-diagnostic", "complete-work", "record-handoff", "bind"), nargs="?", default="ui")
-    parser.add_argument("--lease-id")
+    parser.add_argument("command", choices=("init", "poll-once", "worker", "watchdog", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
+    parser.add_argument("--run")
+    parser.add_argument("--step", type=int)
+    parser.add_argument("--after-step", type=int)
+    parser.add_argument("--staged")
+    parser.add_argument("--worker-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
-    parser.add_argument("--chat-url")
-    parser.add_argument("--handoff-succeeded", action="store_true")
-    parser.add_argument("--dev-session-id")
-    parser.add_argument("--completion-token")
-    parser.add_argument("--handoff-token")
-    parser.add_argument("--worker-id")
-    parser.add_argument("--navigation-attempts", type=int, default=1)
-    parser.add_argument("--verification-attempts", type=int, default=1)
     args = parser.parse_args(argv)
     home = app_home()
     if args.command == "init":
         path = config_path(home)
-        if path.exists(): print(f"EXISTS {path}")
+        if not path.exists():
+            home.mkdir(parents=True, exist_ok=True)
+            write_example(path, Path.cwd())
+            print(f"CREATED {path}")
         else:
-            home.mkdir(parents=True, exist_ok=True); write_example(path, Path.cwd()); print(f"CREATED {path}")
+            print(f"EXISTS {path}")
         return 0
     if args.command == "bind":
         if not args.target_id:
             parser.error("bind requires --target-id")
-        print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type, chat_url=args.chat_url or 'https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9', dev_session_id=args.dev_session_id or '')}")
-        return 0
-    if args.command in {"status", "start-background", "stop-background", "run-background-worker"}:
-        config = load_config(home)
-        if args.command == "status":
-            import json
-            print(json.dumps(runner_status(config), ensure_ascii=False, sort_keys=True))
-            return 0
-        if args.command == "start-background":
-            ok, detail = start_background(config)
-            print(f"BACKGROUND_START {'OK' if ok else 'FAILED'} {detail}")
-            return 0 if ok else 1
-        if args.command == "stop-background":
-            ok, detail = stop_background(config)
-            print(f"BACKGROUND_STOP {'OK' if ok else 'FAILED'} {detail}")
-            return 0 if ok else 1
-        return BackgroundRunner(config).run()
-    if args.command == "complete-diagnostic":
-        if not args.lease_id or not args.completion_token:
-            parser.error("complete-diagnostic requires --lease-id and --completion-token")
-        config = load_config(home)
-        path = write_completion_receipt(config.local_project_storage, args.lease_id, args.completion_token)
-        print(f"DIAGNOSTIC_COMPLETION_RECORDED {path}")
+        print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type)}")
         return 0
     config = load_config(home)
-    if args.command == "record-handoff":
-        if not args.lease_id or not args.handoff_token or not args.worker_id:
-            parser.error("record-handoff requires --lease-id, --worker-id, and --handoff-token")
-        path = write_evidence(config.local_project_storage, lease_id=args.lease_id, worker_id=args.worker_id, handoff_token=args.handoff_token, chat_url=args.chat_url or config.chat_url, navigation_attempts=args.navigation_attempts, verification_attempts=args.verification_attempts)
-        print(f"HANDOFF_EVIDENCE_RECORDED {path}")
+    store = StateStore(config.local_project_storage)
+    if args.command == "status":
+        print(json.dumps(store.load(), ensure_ascii=False, sort_keys=True))
         return 0
-    if args.command == "complete-work":
-        if not args.lease_id or not args.completion_token or not args.handoff_token:
-            parser.error("complete-work requires --lease-id, --completion-token, and --handoff-token")
-        path = write_work_completion_receipt(config.local_project_storage, args.lease_id, args.completion_token, args.handoff_token)
-        print(f"WORK_COMPLETION_RECORDED {path}")
+    if args.command == "stop":
+        state = store.load()
+        state["stop_requested"] = True
+        state["mode"] = "STOPPED"
+        store.save(state)
+        print("STOP_REQUESTED")
         return 0
-    if args.command == "run":
-        target = CodexTarget(config.target_type, config.target_id, config.target_label, config.repo_path)
-        if config.target_type == "mock":
-            adapter = MockWakeAdapter()
-        elif config.target_type == "codex-app-server":
-            adapter = CodexAppServerWakeAdapter(target, config.local_project_storage / "logs", config.codex_command, config.local_project_storage, config.dev_session_id)
-        else:
-            adapter = CodexCliWakeAdapter(target, config.local_project_storage / "logs", config.codex_command)
-        relay = Supervisor(config, GoogleGmailGateway(config.gmail_auth_home), adapter)
-        relay.start()
-        print("AGENT_RELAY_RUNNING", flush=True)
-        try:
-            while True:
-                relay.poll_once()
-                time.sleep(config.poll_interval)
-        except KeyboardInterrupt:
-            relay.stop()
+    if args.command == "test-gmail":
+        GoogleGmailGateway(config.gmail_auth_home).test_connection()
+        print("GMAIL_OK")
         return 0
-    if args.command == "complete":
-        if not args.lease_id:
-            parser.error("complete requires --lease-id")
-        relay = Supervisor(config, None, MockWakeAdapter())
-        relay.write_completion_record(args.lease_id, handoff_succeeded=args.handoff_succeeded)
-        print("COMPLETION_RECORDED")
+    if args.command == "test-wake":
+        NoopWorkerLauncher()
+        print("WAKE_TEST_READY")
         return 0
-    target = CodexTarget(config.target_type, config.target_id, config.target_label, config.repo_path)
-    if config.target_type == "mock":
-        adapter = MockWakeAdapter()
-    elif config.target_type == "codex-app-server":
-        adapter = CodexAppServerWakeAdapter(target, config.local_project_storage / "logs", config.codex_command, config.local_project_storage, config.dev_session_id)
-    else:
-        adapter = CodexCliWakeAdapter(target, config.local_project_storage / "logs", config.codex_command)
-    app = RelayApp(Supervisor(config, GoogleGmailGateway(config.gmail_auth_home), adapter))
-    app.mainloop()
+    if args.command == "poll-once":
+        result = Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()).poll_once()
+        print(json.dumps({"action": result.action, "message_id": result.message_id}, sort_keys=True))
+        return 0
+    if args.command == "worker":
+        if not args.run or args.step is None or not args.staged:
+            parser.error("worker requires --run, --step, and --staged")
+        worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
+        outcome = worker.run(run_id=args.run, step=args.step, staged_path=Path(args.staged), worker_id=args.worker_id)
+        print(json.dumps({"ok": outcome.ok, "detail": outcome.detail}, ensure_ascii=False))
+        return 0 if outcome.ok else 1
+    if args.command == "watchdog":
+        if not args.run or args.after_step is None:
+            parser.error("watchdog requires --run and --after-step")
+        result = run_watchdog(config, run_id=args.run, after_step=args.after_step, poll_factory=lambda: Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()))
+        print(f"WATCHDOG_{result.upper()}")
+        return 0
     return 0
+
+
+def _spawn_watchdog(config, run_id: str, after_step: int) -> None:
+    from .watchdog import spawn_watchdog
+    spawn_watchdog(config, run_id=run_id, after_step=after_step)
 
 
 if __name__ == "__main__":

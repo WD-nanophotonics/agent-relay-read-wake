@@ -28,7 +28,18 @@ def atomic_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def default_state() -> dict[str, Any]:
-    return {"state": "STOPPED", "current_run": None, "expected_step": 1, "expected_parent": 0, "consumed_message_ids": [], "logical_steps": {}, "active_lease": None, "last": {}, "last_error": None}
+    """The intentionally small durable contract for the two-shot relay."""
+    return {
+        "mode": "IDLE",
+        "current_run": None,
+        "expected_step": 1,
+        "expected_parent": 0,
+        "consumed_message_ids": [],
+        "logical_hashes": {},
+        "stop_requested": False,
+        "active_worker": None,
+        "last_error": None,
+    }
 
 
 class StateStore:
@@ -42,10 +53,18 @@ class StateStore:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"malformed supervisor state: {self.path}") from exc
-        if not isinstance(value, dict) or not isinstance(value.get("consumed_message_ids"), list):
+            raise ValueError(f"malformed relay state: {self.path}") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("consumed_message_ids", []), list):
             raise ValueError("malformed supervisor state fields")
-        return {**default_state(), **value}
+        # Old lease/lifecycle fields are deliberately not carried into the
+        # terminating-worker model.
+        migrated = default_state()
+        migrated.update({key: value[key] for key in migrated if key in value})
+        if not isinstance(migrated["logical_hashes"], dict):
+            raise ValueError("malformed logical hash state")
+        if migrated["mode"] not in {"IDLE", "BUSY", "STOPPED"}:
+            migrated["mode"] = "IDLE"
+        return migrated
 
     def save(self, state: dict[str, Any]) -> None:
         atomic_json(self.path, state)

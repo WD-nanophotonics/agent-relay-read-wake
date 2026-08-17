@@ -1,7 +1,7 @@
-"""Deterministic Gmail Read & Wake Supervisor (Phase 1)."""
+"""Minimal two-shot Gmail relay: poll once, run one worker, retry at most twice."""
 
 from .protocol import Disposition, ProtocolEnvelope, ProtocolError, parse_envelope
-from .supervisor import Supervisor, SupervisorState
-from .wake import CodexTarget, MockWakeAdapter, WakeLease, WakeResult
+from .relay import NoopWorkerLauncher, PollResult, Relay
+from .worker import OneShotWorker, WorkerOutcome
 
-__all__ = ["CodexTarget", "Disposition", "MockWakeAdapter", "ProtocolEnvelope", "ProtocolError", "Supervisor", "SupervisorState", "WakeLease", "WakeResult", "parse_envelope"]
+__all__ = ["Disposition", "NoopWorkerLauncher", "OneShotWorker", "PollResult", "ProtocolEnvelope", "ProtocolError", "Relay", "WorkerOutcome", "parse_envelope"]

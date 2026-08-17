@@ -1,209 +1,42 @@
-# AgentRelay Read & Wake Supervisor (Phase 1 / Phase 3A / Phase 2J)
+# AgentRelay — Minimal Two-Shot Relay
 
-This repository contains two deliberately separate local tools:
-
-- `gmail-courier`: the original attachment courier and Gmail/OAuth reference implementation.
-- `agent-relay`: a deterministic **Read & Wake Supervisor** for one configured Codex project.
-
-AgentRelay is not an AI agent, does not run Codex continuously, does not poll Gmail through Codex, and does not automate Chrome. **AI never waits; software waits.** Gmail polling and wake authorization are ordinary, auditable software decisions.
-
-## Phase 1 architecture
+本仓库保留 `gmail-courier` 作为 Gmail/OAuth 参考实现，并提供一个短命、可审计的 `agent-relay`。生产路径不是常驻 Supervisor：
 
 ```text
-Gmail -> deterministic AGENTRELAY/1 parser -> atomic project inbox staging
-      -> persistent state + JSONL audit ledger -> one mock Codex work lease
+Python Gmail poll-once
+  └─ stage at most one → spawn exactly one Worker
+       └─ bounded work / checks / commit / push / fixed ChatGPT handoff
+            └─ detached watchdog (最多两次 poll-once) → Worker exits
 ```
 
-The desktop UI starts in `STOPPED`. Only **Start** enables polling. **Stop** immediately blocks new Gmail processing, attachment staging, and wake attempts; closing the window also stops monitoring. The UI exposes status, project/target binding, run/step, last events, and safe Gmail/mock-wake diagnostics.
+“AI 永不等待，软件等待”。`poll-once` 只执行一个 Gmail fetch cycle，不 sleep、不循环、不通过 Codex Gmail integration 读取邮件。已有活动的精确 Worker owner 会使本次调用无操作；旧步骤忽略，未来有效步骤暂缓且不消费，同一 logical step 的不同哈希 fail closed。`NO_ACTION` 只推进协议序号，`WAKE` 才暂存并启动 Worker，`HUMAN_REQUIRED` 不启动 Worker。
 
-States are `STOPPED`, `MONITORING`, `STAGING`, `READY_TO_WAKE`, `WAKING`, `AGENT_RUNNING`, `DRAINING`, `WAITING_FOR_REPLY`, `HUMAN_REQUIRED`, and `ERROR`. Invalid, future, or conflicting messages fail closed and never wake an agent.
+持久化只有 `IDLE`、`BUSY`、`STOPPED` 三种模式，以及 run/expected step/parent、已消费 Gmail ID、logical hash、停止标记和精确 active-worker owner。状态 JSON 原子替换，账本为追加 JSONL；inbox 暂存先写临时目录再原子发布。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\gmail-courier`，不进入 Git。
 
-## Configure and run
-
-Install as usual, then create the local configuration:
+## 命令
 
 ```powershell
 python -m pip install -e ".[dev]"
 agent-relay init
-notepad "$env:LOCALAPPDATA\AgentRelay\agentrelay.toml"
-agent-relay ui
-```
-
-`agentrelay.example.toml` is a checked-in, credential-free example. It configures one project (`gmail-courier`) and its isolated runtime storage at `%LOCALAPPDATA%\AgentRelay\projects\gmail-courier`. AgentRelay reuses the existing Gmail Courier OAuth token from `%LOCALAPPDATA%\GmailCourier` by default. Do not commit OAuth clients, `token.json`, inbox contents, state, or logs.
-
-`Test Gmail` validates authentication/connection only. `Test Wake` remains mock-only in Phase 1. The mock never starts Codex or a browser.
-
-## Gmail protocol
-
-The first block of a message body must be exactly versioned and machine-readable:
-
-```text
-AGENTRELAY/1
-
-CHANNEL: AR-GMAILCOURIER-A1R7P
-RUN: RUN-20260816-001
-STEP: 0001
-PARENT: 0000
-DISPOSITION: WAKE
-PROJECT: gmail-courier
-
-Human task content follows here.
-```
-
-Supported dispositions are `WAKE`, `HUMAN_REQUIRED`, and `NO_ACTION`. A wake requires a matching project/channel, supported protocol, new Gmail ID, expected run/step/parent, successful atomic staging, and no active lease. Duplicate IDs and old steps are ignored; a future step or conflicting content for an already known logical step enters `HUMAN_REQUIRED`.
-
-Staged content is stored as `inbox/RUN-…/STEP-…/message.txt`, `manifest.json`, and `attachments/`. The manifest records Gmail identity, protocol fields, timestamps, metadata, and hashes. `ledger/events.jsonl` is append-oriented and excludes credentials.
-
-## Phase 2 boundary
-
-Phase 2 supplies a real `WakeAdapter` that binds to a verified Codex thread/session, a real end-of-lease contract, and optional Chrome/ChatGPT handoff. It must not replace the deterministic protocol, state machine, staging layout, or one-active-lease invariant.
-
-## Phase 2F App Server configuration
-
-Phase 2F makes a Supervisor-owned `codex app-server --stdio` JSONL connection the
-primary real wake path. The supervisor initializes one long-lived connection,
-binds one dedicated worker, starts at most one turn per lease, and requires both
-`turn/completed` and the matching local completion receipt before accepting a
-diagnostic completion. If a previously bound worker is locked by another writer,
-AgentRelay provisions a new worker through that same App Server and persists the
-new binding; it never steals or kills the old writer. The App Server process is
-started with Windows no-console flags and is stopped with the supervisor.
-
-Set `target_type = "codex-app-server"` and bind the dedicated worker with
-`agent-relay bind --target-id <worker-id> --target-type codex-app-server`.
-`codex-cli` remains an explicit compatibility fallback only; it is not the Phase
-2F primary path. The App Server adapter never falls back to the CLI or Chrome.
-
-## Phase 2 real-wake configuration
-
-Set `target_type = "codex-cli"`, an exact Codex session UUID in `target_id`, and the local CLI command in `codex_command`. The real adapter uses the official `codex exec resume <session-id>` fallback with Windows no-console flags; launch acceptance becomes `AGENT_RUNNING`, never completion. Each lease carries an unpredictable completion token and a `WORK` or `DIAGNOSTIC` kind. Work completion requires explicit handoff evidence; bounded diagnostics may complete without ChatGPT via `agent-relay complete-diagnostic --lease-id <id> --completion-token <token>`. The supervisor validates protocol, kind, lease ID, and token before an atomic completion record can move it to `WAITING_FOR_REPLY`.
-
-`scripts/phase2d_diagnostic.py` is a one-message, bounded diagnostic harness for the configured worker. It does not authorize a second wake after a timeout. An abandoned lease is resolved through the audited supervisor recovery path and remains `HUMAN_REQUIRED`.
-
-`scripts/phase2f_diagnostic.py` is the Phase 2F one-message harness. It reads the
-already-authorized message through the local Python Gmail gateway, records
-process/worker/turn and foreground-console evidence, and never polls Gmail again
-or tests Chrome. A real diagnostic is attempted once; a missing receipt or
-App Server lifecycle error is a blocker rather than an automatic retry.
-
-An unknown persisted active lease enters `HUMAN_REQUIRED` on restart rather than being awakened again. The ChatGPT URL remains an explicit configuration field; browser handoff is intentionally unavailable unless a separately functional, silent-background-certified adapter is configured.
-
-## Phase 3A production background runner
-
-Phase 3A adds a hidden, single-instance Windows background runner while keeping
-the foreground `run` command for diagnostics. It persists runner identity, PID,
-backend worker, heartbeat, current run/step, and active lease ID in the project
-runtime directory. An atomic cross-process ownership file prevents duplicate
-workers; an orphaned lock is recoverable only after its recorded PID is dead.
-Runtime metadata never contains OAuth credentials or lease tokens.
-
-```powershell
-agent-relay start-background
+agent-relay poll-once
 agent-relay status
-agent-relay stop-background
+agent-relay stop
 ```
 
-The detached launcher creates no console or focus takeover. Stop requests are
-honored only at a processing boundary: an active lease is never killed or
-silently abandoned, and the runner reports `ACTIVE_LEASE` until its audited
-outcome. Gmail polling follows the configured interval while heartbeats remain
-observable. Phase 3A does not expand Chrome automation or author the next Gmail
-task; the fixed ChatGPT handoff remains an explicit external contract.
+`test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。Worker 使用配置的 Codex 命令执行单个暂存任务，完成后写固定格式 handoff 报告并启动一次 detached watchdog。Watchdog 用 `project + RUN + AFTER_STEP` 精确锁去重，最多等待/调用两次 `poll-once`，绝不打断活动 Worker、递归唤醒或常驻运行。
 
-## Phase 2J completion-path recovery
+## 安全边界
 
-The production runner checks for a deterministic completion receipt while a
-lease is `AGENT_RUNNING`, before polling Gmail again. `complete-work` and
-`complete-diagnostic` are pure receipt writers: they validate the exact
-persisted lease and never construct a state-mutating Supervisor. Ordinary
-Supervisor construction is read-only; only the production runner opts into
-startup recovery policy.
+新协议仍严格要求 `AGENTRELAY/1`、`CHANNEL`、`RUN`、`STEP`、`PARENT`、`DISPOSITION`、`PROJECT`。只接受配置的项目和稳定频道 `AR-GMAILCOURIER-A1R7P`。OAuth/token、inbox、state、logs 和 handoff 运行时目录均被忽略；日志不写入凭据。
 
-App Server terminal events are retained by exact `(thread_id, turn_id)` and
-consumed only by the matching lease. After a verified WORK handoff, the
-Supervisor may issue one bounded `turn/interrupt` for the exact owned turn;
-the real terminal event is still required and no completion event is
-fabricated. A cleanup interrupt does not undo logical WORK completion.
+本阶段删除了持久化 Runner、Supervisor 状态机、后台轮询线程、DRAINING/transport reconciliation、长寿命 App Server/醒门恢复层。保留的 Gmail gateway、协议解析、确定性暂存、哈希验证、原子状态和账本是唯一 Gmail 读取路径。真实 Codex thread/wake、Chrome/ChatGPT 交接的扩展点仍由固定 handoff 报告承载，不在本阶段引入常驻服务。
 
-Logical completion enters `DRAINING` until the exact prior worker/turn
-transport is quiescent. Gmail is not polled in this state, so a valid next
-WAKE remains in Gmail and is deferred rather than consumed or classified as
-human-required. Once cleanup is verified, the supervisor enters
-`WAITING_FOR_REPLY` and the ordinary poller continues automatically.
-
-If the local test runner is unstable on Windows, use compileall and the
-standalone deterministic checks first; pytest remains the intended project
-gate when the host is healthy. Runtime files and credentials remain outside
-the repository under `%LOCALAPPDATA%\\AgentRelay`.
-
----
-
-# Original Gmail Courier
-
-Gmail Courier is a local, one-process attachment courier. It reads messages
-sent to the configured Gmail account, routes them by project code, writes
-attachments to the registered project's inbox, and optionally commits and
-pushes only that delivery directory.
-
-## First setup
-
-From this repository's virtual environment:
+## 验证
 
 ```powershell
-python -m venv .venv
-.\\.venv\\Scripts\\python -m pip install -e ".[dev]"
-Copy-Item projects.example.toml "$env:LOCALAPPDATA\\GmailCourier\\projects.toml"
-gmail-courier auth --client "$env:LOCALAPPDATA\\GmailCourier\\oauth-client.json"
+python -m compileall -q agent_relay gmail_courier
+python tests/test_minimal_relay.py
+python -m pytest tests/test_minimal_relay.py tests/test_courier.py
 ```
 
-The OAuth client must be a Google Cloud Desktop application with Gmail API
-enabled. The courier requests only `gmail.readonly`; credentials and runtime
-state stay under `%LOCALAPPDATA%\\GmailCourier` and are never committed.
-
-Edit `projects.toml` before starting the daemon. Each project needs a unique
-`code`, an absolute Git worktree `root`, an inbox path relative to that root,
-the expected branch, and its Git push policy.
-
-## Protocol
-
-Use this subject format:
-
-```text
-[GMAIL-COURIER][PROJECT_CODE][TASK] delivery-id
-```
-
-`TASK` may be replaced by `AUDIT`, `CONTROL`, or another uppercase type. The
-message must be sent from and to the configured Gmail account and contain at
-least one attachment. Unknown or ambiguous project codes are written to the
-local quarantine directory and are never delivered to a project.
-
-The legacy `[GC-BRIDGE]` subject is accepted only for a project that explicitly
-lists that marker in `legacy_prefixes`.
-
-## Commands
-
-```powershell
-gmail-courier init
-gmail-courier once
-gmail-courier ensure
-gmail-courier status
-gmail-courier stop
-gmail-courier install-autostart
-gmail-courier uninstall-autostart
-```
-
-`once` is useful for a smoke test. `ensure` starts one detached daemon and is
-safe to call repeatedly. The daemon uses a SQLite message ledger, atomic
-delivery directories, and retryable Git push state.
-
-## Safety guarantees
-
-- Attachments are stored as data and never executed.
-- Filenames are sanitized and cannot escape the configured inbox.
-- Duplicate Gmail message IDs do not create duplicate deliveries.
-- A temporary directory is atomically renamed only after all attachments and
-  the manifest have been written.
-- Git operations fail closed on the wrong worktree or branch.
-- Only the current delivery path is staged and committed; unrelated changes
-  remain untouched.
-- A failed push is retried without downloading or committing the delivery again.
+pytest 若使宿主崩溃，必须保留退出证据，不能把未完成运行报告为 PASS；`compileall` 和直接 unittest 是不依赖 pytest 的确定性检查。
