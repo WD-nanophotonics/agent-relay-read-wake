@@ -35,11 +35,14 @@ agent-relay watchdog-ui
 
 本阶段删除了持久化 Runner、Supervisor 状态机、后台轮询线程、DRAINING/transport reconciliation、长寿命 App Server/醒门恢复层。保留的 Gmail gateway、协议解析、确定性暂存、哈希验证、原子状态和账本是唯一 Gmail 读取路径。ChatGPT 交接通过配置的固定 URL 一次性 sender 完成，不引入常驻服务。
 
+`agent_relay.local_controller` is a separate certification-only local loop. Its Controller A owns a durable finite objective and examines Worker B's file result before making exactly one of `CONTINUE`, `COMPLETE`, or `HUMAN_REQUIRED`; B only executes a bounded file-backed task. It neither reads Gmail nor starts a watchdog or browser bridge. Each A→B and B→A handoff is held until the successor's exact ACK, claim (for B), and liveness record are durable.
+
 ## 验证
 
 ```powershell
 python -m compileall -q agent_relay gmail_courier
 python tools/certify_minimal_closure.py
+python tools/certify_local_controller_loop.py
 python tests/test_minimal_relay.py
 python -m pytest tests/test_minimal_relay.py tests/test_courier.py
 ```
