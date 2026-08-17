@@ -114,7 +114,12 @@ def _append(ledger: Ledger, event: str, *, run_id: str, after_step: int, watchdo
 
 
 def spawn_watchdog_ui(config) -> int:
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    # When the caller itself is running inside a Windows job (as the desktop
+    # host may do), ask for a breakaway so the five-minute owner is not killed
+    # merely because the short-lived launcher exits.  Fall back cleanly on
+    # hosts that disallow breakaway.
+    breakaway = 0x01000000 if os.name == "nt" else 0
     relay_root = Path(__file__).resolve().parents[1]
     process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog-ui"], cwd=relay_root, creationflags=flags, close_fds=True)
     return process.pid
@@ -144,7 +149,11 @@ def spawn_watchdog(config, *, run_id: str, after_step: int) -> dict[str, Any]:
         # follow-up Gmail Worker and turn an ordinary message into a synthetic
         # cursor transition.
         child_env.pop("AGENT_RELAY_MANAGED_AGENT", None)
-        process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog", "--run", run_id, "--after-step", str(after_step), "--watchdog-id", watchdog_id], cwd=relay_root, creationflags=flags, close_fds=True, env=child_env)
+        command = [sys.executable, "-m", "agent_relay.cli", "watchdog", "--run", run_id, "--after-step", str(after_step), "--watchdog-id", watchdog_id]
+        try:
+            process = subprocess.Popen(command, cwd=relay_root, creationflags=flags | breakaway, close_fds=True, env=child_env)
+        except OSError:
+            process = subprocess.Popen(command, cwd=relay_root, creationflags=flags, close_fds=True, env=child_env)
     except Exception as exc:
         status.update({"status": "FAILED", "last_error": f"Popen: {type(exc).__name__}: {exc}", "finished_at": now(), "finish_reason": "spawn_failed"})
         _save_status(root, run_id, after_step, status)
