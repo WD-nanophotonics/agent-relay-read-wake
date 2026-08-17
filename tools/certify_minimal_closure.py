@@ -49,16 +49,22 @@ def main():
         msg = GmailMessage("m1", "t", None, body(), ())
         staged_probe = root / "staged-probe"; staged_probe.mkdir(parents=True); (staged_probe / "message.txt").write_text("AUTHORITATIVE " + ("x" * 200000), encoding="utf-8")
         captured = {}
-        original_run = worker_module.subprocess.run
-        def fake_run(argv, **kwargs):
+        original_popen = worker_module.subprocess.Popen
+        class FakeCodexProcess:
+            pid = __import__("os").getpid()
+            returncode = 0
+            def communicate(self, prompt, timeout=None):
+                captured["input"] = prompt
+                return "bounded", ""
+        def fake_popen(argv, **kwargs):
             captured["argv"] = argv
             captured.update(kwargs)
-            return SimpleNamespace(returncode=0, stdout="bounded", stderr="")
-        worker_module.subprocess.run = fake_run
+            return FakeCodexProcess()
+        worker_module.subprocess.Popen = fake_popen
         try:
             bounded = OneShotWorker(cfg)._subprocess_executor(staged_probe, cfg.repo_path)
         finally:
-            worker_module.subprocess.run = original_run
+            worker_module.subprocess.Popen = original_popen
         assert bounded.ok and captured["argv"][-1] == "-" and str(staged_probe.resolve()) not in " ".join(map(str, captured["argv"])) and len(" ".join(map(str, captured["argv"]))) < 2000 and "AUTHORITATIVE" not in " ".join(map(str, captured["argv"]))
         prompt = captured.get("input", "")
         assert str(staged_probe.resolve()) in prompt and len(prompt) < 2000 and "AUTHORITATIVE" not in prompt
@@ -79,9 +85,9 @@ def main():
         failed_events = []; failed = Sender(False, failed_events); worker = OneShotWorker(cfg, executor=lambda text, path: WorkerOutcome(True, "ok"), handoff_sender=failed, watchdog_spawn=lambda step, run: failed_events.append("watchdog"))
         staged2 = stage_instruction(root / "failed", msg, parse_envelope(msg.body)); assert not worker.run(run_id="RUN-CERT-001", step=1, staged_path=staged2).ok and "watchdog" not in failed_events; print("FAILED_HANDOFF_NO_WATCHDOG_PASS")
 
-        dead = Launcher(99999999); relay = Relay(cfg, Mail([msg]), dead); assert relay.poll_once().action == "launched"; state = StateStore(cfg.local_project_storage).load(); assert state["expected_step"] == 1 and not state["consumed_message_ids"]; assert relay.poll_once().action == "launched"; print("NO_STEP_LOSS_BEFORE_CLAIM_PASS")
+        dead = Launcher(99999999); relay = Relay(cfg, Mail([msg]), dead); assert relay.poll_once().action == "worker_process_created"; state = StateStore(cfg.local_project_storage).load(); assert state["expected_step"] == 1 and not state["consumed_message_ids"]; assert relay.poll_once().action == "worker_process_created"; print("NO_STEP_LOSS_BEFORE_CLAIM_PASS")
 
-        live = Launcher(__import__("os").getpid()); relay = Relay(replace(cfg, local_project_storage=root / "live"), Mail([msg]), live); assert relay.poll_once().action == "launched" and relay.poll_once().action == "busy" and len(live.calls) == 1; print("SINGLE_WORKER_PASS")
+        live = Launcher(__import__("os").getpid()); relay = Relay(replace(cfg, local_project_storage=root / "live"), Mail([msg]), live); assert relay.poll_once().action == "worker_process_created" and relay.poll_once().action == "busy" and len(live.calls) == 1; print("SINGLE_WORKER_PASS")
         lock_root = root / "mutex"
         with poll_transaction_lock(lock_root) as first:
             with poll_transaction_lock(lock_root) as second:

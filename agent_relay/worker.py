@@ -31,6 +31,7 @@ class OneShotWorker:
         self.executor = executor or self._subprocess_executor
         self.handoff_sender = handoff_sender or CommandHandoffSender(config)
         self.watchdog_spawn = watchdog_spawn
+        self._current_owner: dict | None = None
 
     def claim(self, *, run_id: str, step: int, staged_path: Path, worker_id: str | None = None, message_id: str | None = None, content_hash: str | None = None) -> dict:
         state = self.store.load()
@@ -55,6 +56,7 @@ class OneShotWorker:
             message_id = message_id or pending.get("message_id")
             content_hash = content_hash or pending.get("content_hash")
         owner = {"worker_id": worker_id or str(uuid4()), "pid": os.getpid(), "project_id": self.config.project_id, "run_id": run_id, "step": step, "parent": int((pending or {}).get("parent", step - 1)), "started_at": now(), "exe": Path(sys.executable).name}
+        owner.update({"codex_status": "NOT_STARTED", "codex_pid": None, "codex_exe": None})
         state.update({"mode": "BUSY", "active_worker": owner, "pending_worker": None, "last_error": None})
         if message_id:
             consumed = set(state.get("consumed_message_ids", [])); consumed.add(message_id)
@@ -69,6 +71,7 @@ class OneShotWorker:
 
     def run(self, *, run_id: str, step: int, staged_path: Path, worker_id: str | None = None, message_id: str | None = None, content_hash: str | None = None) -> WorkerOutcome:
         owner = self.claim(run_id=run_id, step=step, staged_path=staged_path, worker_id=worker_id, message_id=message_id, content_hash=content_hash)
+        self._current_owner = owner
         outcome = WorkerOutcome(False, "worker did not complete")
         baseline_sha = ""
         try:
@@ -107,6 +110,27 @@ class OneShotWorker:
                 state.update({"active_worker": None, "mode": "IDLE" if not state.get("stop_requested") else "STOPPED"})
                 self.store.save(state)
                 self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
+            self._current_owner = None
+
+    def _record_codex(self, status: str, *, pid: int | None = None, exe: str | None = None, error: str | None = None, exit_code: int | None = None) -> None:
+        owner = self._current_owner
+        if not owner:
+            return
+        state = self.store.load()
+        active = state.get("active_worker")
+        if not isinstance(active, dict) or active.get("worker_id") != owner.get("worker_id"):
+            return
+        active["codex_status"] = status
+        if pid is not None:
+            active["codex_pid"] = pid
+        if exe is not None:
+            active["codex_exe"] = exe
+        if error is not None:
+            active["codex_error"] = error
+        if exit_code is not None:
+            active["codex_exit_code"] = exit_code
+        state["active_worker"] = active
+        self.store.save(state)
 
     def _subprocess_executor(self, staged_path: str | Path, repo_path: Path) -> WorkerOutcome:
         command = getattr(self.config, "codex_command", "codex.cmd")
@@ -130,12 +154,31 @@ class OneShotWorker:
             "to relay messages. Preserve staged-file prompt transport; never "
             "copy staged task bodies into process argv."
         )
+        owner = self._current_owner or {}
+        self._record_codex("CODEX_STARTING")
+        self.ledger.append("codex_starting", worker_id=owner.get("worker_id"), step=owner.get("step"))
+        codex_exe = "cmd.exe" if os.name == "nt" and str(command).lower().endswith((".cmd", ".bat")) else Path(str(command)).name
         try:
             # Codex exposes these as mutually-exclusive approval modes.  Use the
             # bounded non-interactive approval flag alone; it grants the worker's
             # workspace scope without producing an invalid invocation.
-            result = subprocess.run([command, "exec", "--approve-for-me", "-"], input=prompt, cwd=repo_path, text=True, capture_output=True, timeout=3600, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            process = subprocess.Popen([command, "exec", "--approve-for-me", "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=repo_path, text=True, close_fds=True)
+            self._record_codex("CODEX_STARTED", pid=process.pid, exe=codex_exe)
+            self.ledger.append("codex_started", worker_id=owner.get("worker_id"), step=owner.get("step"), codex_pid=process.pid)
+            stdout, stderr = process.communicate(prompt, timeout=3600)
+            self._record_codex("CODEX_EXITED", exit_code=process.returncode)
+            result = type("Completed", (), {"returncode": process.returncode, "stdout": stdout, "stderr": stderr})()
+        except subprocess.TimeoutExpired as exc:
+            try:
+                process.kill()
+            except (UnboundLocalError, OSError):
+                pass
+            self._record_codex("CODEX_START_FAILED", error=type(exc).__name__)
+            self.ledger.append("codex_start_failed", worker_id=owner.get("worker_id"), step=owner.get("step"), reason=type(exc).__name__)
+            return WorkerOutcome(False, type(exc).__name__)
+        except OSError as exc:
+            self._record_codex("CODEX_START_FAILED", error=type(exc).__name__)
+            self.ledger.append("codex_start_failed", worker_id=owner.get("worker_id"), step=owner.get("step"), reason=type(exc).__name__)
             return WorkerOutcome(False, type(exc).__name__)
         detail = (result.stdout or result.stderr or "").strip()[-4000:]
         return WorkerOutcome(result.returncode == 0, detail)

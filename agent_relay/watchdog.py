@@ -20,6 +20,8 @@ MAX_POLLS = 10
 POLL_TIMEOUT_SECONDS = 30
 WORKER_SHUTDOWN_SECONDS = 10
 NO_WAKE_SHUTDOWN_SECONDS = 30
+WORKER_CLAIM_TIMEOUT_SECONDS = 30
+CODEX_START_TIMEOUT_SECONDS = 30
 
 
 def watchdog_status_path(root: Path, run_id: str, after_step: int) -> Path:
@@ -43,6 +45,8 @@ def _status_template(*, watchdog_id: str, pid: int | None, exe: str, run_id: str
         "last_poll_at": None, "last_poll_action": None, "last_error": None,
         "finish_reason": None, "finished_at": None, "closing_countdown_seconds": None,
         "worker_pid": None, "startup_ack_at": None,
+        "codex_pid": None, "worker_claim_elapsed_seconds": None,
+        "codex_start_elapsed_seconds": None,
         "ui_pid": None, "ui_started_at": None, "ui_error": None,
     }
 
@@ -236,6 +240,73 @@ def _bounded_poll(root: Path, run_id: str, after_step: int, status: dict[str, An
     return result, False
 
 
+def _wait_for_worker_chain(root: Path, run_id: str, after_step: int, status: dict[str, Any], ledger: Ledger, watchdog_id: str, pid: int, result: Any, sleep: Callable[[float], None], clock: Callable[[], float], state_store: StateStore, claim_timeout_seconds: int = WORKER_CLAIM_TIMEOUT_SECONDS, codex_timeout_seconds: int = CODEX_START_TIMEOUT_SECONDS) -> tuple[bool, str]:
+    worker = result.worker or {}
+    worker_id = str(worker.get("worker_id") or "")
+    worker_pid = worker.get("pid")
+    status.update({"status": "GMAIL_WAKE_FOUND", "worker_pid": worker_pid, "codex_pid": None, "worker_claim_elapsed_seconds": 0.0, "codex_start_elapsed_seconds": None, "last_error": None})
+    _save_status(root, run_id, after_step, status)
+    _append(ledger, "watchdog_gmail_wake_found", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid)
+    status["status"] = "WORKER_PROCESS_CREATED"
+    _save_status(root, run_id, after_step, status)
+    _append(ledger, "watchdog_worker_process_created", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid)
+    started = clock()
+    claimed_at: float | None = None
+    while True:
+        elapsed = max(0.0, clock() - started)
+        status["worker_claim_elapsed_seconds"] = round(elapsed, 1)
+        try:
+            state = state_store.load()
+        except Exception as exc:
+            status.update({"status": "WORKER_CLAIM_FAILED", "last_error": f"state read failed: {type(exc).__name__}"})
+            _save_status(root, run_id, after_step, status)
+            return False, "WORKER_CLAIM_FAILED"
+        active = state.get("active_worker")
+        pending = state.get("pending_worker")
+        if isinstance(active, dict) and active.get("worker_id") == worker_id:
+            if claimed_at is None:
+                claimed_at = clock()
+                status["status"] = "WORKER_CLAIMED"
+                _save_status(root, run_id, after_step, status)
+                _append(ledger, "watchdog_worker_claimed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid)
+            codex_elapsed = max(0.0, clock() - claimed_at)
+            status["codex_start_elapsed_seconds"] = round(codex_elapsed, 1)
+            codex_status = str(active.get("codex_status") or "NOT_STARTED")
+            codex_pid = active.get("codex_pid")
+            codex_exe = active.get("codex_exe") or ""
+            if codex_status in {"NOT_STARTED", "CODEX_STARTING"}:
+                if status.get("status") != "CODEX_STARTING":
+                    status["status"] = "CODEX_STARTING"
+                    _save_status(root, run_id, after_step, status)
+                    _append(ledger, "watchdog_codex_starting", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid)
+            if codex_status == "CODEX_STARTED" and isinstance(codex_pid, int) and exact_owner_live({"pid": codex_pid, "exe": codex_exe}):
+                status.update({"status": "CODEX_RUNNING", "codex_pid": codex_pid})
+                _save_status(root, run_id, after_step, status)
+                _append(ledger, "watchdog_codex_running", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), codex_pid=codex_pid)
+                status["status"] = "WAKE_CHAIN_CONFIRMED"
+                _save_status(root, run_id, after_step, status)
+                _append(ledger, "watchdog_wake_chain_confirmed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid, codex_pid=codex_pid)
+                return True, "WAKE_CHAIN_CONFIRMED"
+            if codex_status in {"CODEX_START_FAILED", "CODEX_EXITED"} or codex_elapsed >= codex_timeout_seconds:
+                status.update({"status": "CODEX_START_FAILED", "last_error": active.get("codex_error") or f"Codex did not start within {codex_timeout_seconds}s"})
+                _save_status(root, run_id, after_step, status)
+                _append(ledger, "watchdog_codex_start_failed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), error=status["last_error"])
+                return False, "CODEX_START_FAILED"
+        elif isinstance(pending, dict) and pending.get("worker_id") == worker_id:
+            if isinstance(worker_pid, int) and not exact_owner_live({"pid": worker_pid, "exe": worker.get("exe", "")}):
+                status.update({"status": "WORKER_CLAIM_FAILED", "last_error": "worker exited before claim"})
+                _save_status(root, run_id, after_step, status)
+                _append(ledger, "watchdog_worker_claim_failed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid)
+                return False, "WORKER_CLAIM_FAILED"
+        elif claimed_at is None and elapsed >= claim_timeout_seconds:
+            status.update({"status": "WORKER_CLAIM_FAILED", "last_error": f"worker claim not observed within {claim_timeout_seconds}s"})
+            _save_status(root, run_id, after_step, status)
+            _append(ledger, "watchdog_worker_claim_failed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=status.get("poll_number"), worker_pid=worker_pid)
+            return False, "WORKER_CLAIM_FAILED"
+        _save_status(root, run_id, after_step, status)
+        sleep(0.5)
+
+
 def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=time.sleep, watchdog_id: str | None = None, ui_spawn=None, clock=time.monotonic, poll_interval_seconds: int = POLL_INTERVAL_SECONDS, max_polls: int = MAX_POLLS, poll_timeout_seconds: int = POLL_TIMEOUT_SECONDS) -> str:
     root = config.local_project_storage
     ledger = Ledger(root)
@@ -273,12 +344,12 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=ti
                 _save_status(root, run_id, after_step, status)
                 return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FAILED", status.get("last_error") or "poll_failed", return_value="failed")
             action = result.action
-            if action == "launched":
-                status.update({"status": "WORKER_STARTED", "worker_pid": (result.worker or {}).get("pid"), "last_poll_action": action})
-                _save_status(root, run_id, after_step, status)
-                _append(ledger, "watchdog_worker_detected", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=poll_number, worker_pid=status.get("worker_pid"))
+            if action in {"worker_process_created", "launched"}:
+                confirmed, chain_status = _wait_for_worker_chain(root, run_id, after_step, status, ledger, watchdog_id, pid, result, sleep, clock, state_store)
+                if not confirmed:
+                    return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, chain_status, chain_status, return_value="failed")
                 _countdown(root, run_id, after_step, status, WORKER_SHUTDOWN_SECONDS, sleep, clock)
-                return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FINISHED", "worker_started", return_value="launched")
+                return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FINISHED", "wake_chain_confirmed", return_value="launched")
             if action in {"human_required", "conflict", "launch_failed"}:
                 status["status"] = "FAILED"; status["last_error"] = action; _save_status(root, run_id, after_step, status)
                 return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FAILED", action, return_value=action)

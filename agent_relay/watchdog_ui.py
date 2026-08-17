@@ -78,6 +78,8 @@ def run_watchdog_ui(config) -> int:
         ("Last check", "last_poll_at"), ("Last poll result", "last_poll_action"),
         ("Last duration", "poll_duration_seconds"), ("Last error", "last_error"),
         ("Closing monitor in", "closing_countdown_seconds"), ("Worker PID", "worker_pid"),
+        ("Worker claim wait", "worker_claim_elapsed_seconds"), ("Codex PID", "codex_pid"),
+        ("Codex start wait", "codex_start_elapsed_seconds"),
         ("Finished reason", "finish_reason"),
     ]
     values: dict[str, ttk.Label] = {}
@@ -110,7 +112,7 @@ def run_watchdog_ui(config) -> int:
             values["after_step"].configure(text=f"{int(watchdog.get('after_step', 0)):04d}")
             values["pid_alive"].configure(text=f"{watchdog.get('pid', '-')} / {'alive' if watchdog.get('alive') else 'dead'}")
             values["poll"].configure(text=f"{watchdog.get('poll_number', 0)} / {watchdog.get('max_polls', 10)}")
-            for key in ("started_at", "ui_pid", "countdown_seconds", "total_elapsed_seconds", "polling_for_seconds", "last_poll_at", "last_poll_action", "poll_duration_seconds", "last_error", "closing_countdown_seconds", "worker_pid", "finish_reason"):
+            for key in ("started_at", "ui_pid", "countdown_seconds", "total_elapsed_seconds", "polling_for_seconds", "last_poll_at", "last_poll_action", "poll_duration_seconds", "last_error", "closing_countdown_seconds", "worker_pid", "worker_claim_elapsed_seconds", "codex_pid", "codex_start_elapsed_seconds", "finish_reason"):
                 values[key].configure(text=str(watchdog.get(key) if watchdog.get(key) is not None else "-"))
         values["relay_mode"].configure(text=relay.get("mode", "-"))
         values["expected_step"].configure(text=str(relay.get("expected_step", "-")))

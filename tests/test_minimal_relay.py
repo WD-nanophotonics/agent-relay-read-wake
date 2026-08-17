@@ -56,10 +56,10 @@ class MinimalRelayTests(unittest.TestCase):
     def test_no_mail_is_one_cycle(self):
         r = self.relay([]); self.assertEqual(r.poll_once().action, "idle"); self.assertEqual(r.gmail.list_calls, 1)
     def test_valid_wake_stages_and_launches_once(self):
-        l = NoopWorkerLauncher(); result = self.relay([self.msg()], l).poll_once(); self.assertEqual(result.action, "launched"); self.assertEqual(len(l.calls), 1)
+        l = NoopWorkerLauncher(); result = self.relay([self.msg()], l).poll_once(); self.assertEqual(result.action, "worker_process_created"); self.assertEqual(len(l.calls), 1)
         self.assertTrue((result.staged_path / "manifest.json").exists())
     def test_duplicate_message_is_ignored(self):
-        l = NoopWorkerLauncher(); r = self.relay([self.msg()], l); self.assertEqual(r.poll_once().action, "launched"); self.assertEqual(r.poll_once().action, "busy"); self.assertEqual(len(l.calls), 1)
+        l = NoopWorkerLauncher(); r = self.relay([self.msg()], l); self.assertEqual(r.poll_once().action, "worker_process_created"); self.assertEqual(r.poll_once().action, "busy"); self.assertEqual(len(l.calls), 1)
     def test_old_step_is_ignored(self):
         s = StateStore(self.cfg.local_project_storage); st = s.load(); st.update({"current_run": "RUN-TEST-001", "expected_step": 2, "expected_parent": 1}); s.save(st)
         self.assertEqual(self.relay([self.msg(step=1)]).poll_once().action, "idle")

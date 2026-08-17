@@ -163,8 +163,9 @@ class Relay:
             worker.update({"message_id": message_id, "content_hash": content_hash, "staged_path": str(staged)})
             state.update({"mode": "BUSY", "pending_worker": worker, "last_error": None})
             self.store.save(state)
+            self.ledger.append("worker_process_created", message_id=message_id, step=step, worker_id=worker.get("worker_id"), pid=worker.get("pid"))
             self.ledger.append("worker_launch_pending_claim", message_id=message_id, step=step, worker_id=worker.get("worker_id"))
-            return PollResult("launched", message_id, staged, worker)
+            return PollResult("worker_process_created", message_id, staged, worker)
         self.ledger.append("poll_complete", fetched=len(ids))
         return PollResult("idle")
 
