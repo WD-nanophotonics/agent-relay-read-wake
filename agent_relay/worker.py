@@ -11,6 +11,7 @@ from typing import Callable
 from uuid import uuid4
 
 from .handoff import build_actionable_report, CommandHandoffSender, update_watchdog_startup_evidence, write_evidence
+from .obligations import attempt_handoff, create_obligation, mark_result_ready
 from .ownership import exact_owner_live
 from .storage import Ledger, StateStore, now
 
@@ -57,6 +58,7 @@ class OneShotWorker:
             message_id = message_id or pending.get("message_id")
             content_hash = content_hash or pending.get("content_hash")
         owner = {"worker_id": worker_id or str(uuid4()), "pid": os.getpid(), "project_id": self.config.project_id, "run_id": run_id, "step": step, "parent": int((pending or {}).get("parent", step - 1)), "started_at": now(), "exe": Path(sys.executable).name}
+        owner["handoff_token"] = f"AR-HANDOFF-{owner['worker_id']}"
         owner.update({"codex_status": "NOT_STARTED", "codex_pid": None, "codex_exe": None})
         state.update({"mode": "BUSY", "active_worker": owner, "pending_worker": None, "last_error": None})
         if message_id:
@@ -68,50 +70,142 @@ class OneShotWorker:
             state["logical_hashes"][f"{run_id}:{step:04d}"] = content_hash or ""
         self.store.save(state)
         self.ledger.append("worker_claimed", worker_id=owner["worker_id"], run_id=run_id, step=step)
+        try:
+            create_obligation(self.config.local_project_storage, worker_id=owner["worker_id"], run_id=run_id,
+                              step=step, parent=owner["parent"], project_id=self.config.project_id,
+                              channel_id=self.config.channel_id, repository=str(self.config.repo_path),
+                              chat_url=self.config.chat_url, message_id=message_id,
+                              content_hash=content_hash, worker_pid=owner["pid"],
+                              worker_exe=owner["exe"])
+        except Exception:
+            rollback = self.store.load()
+            if rollback.get("active_worker", {}).get("worker_id") == owner["worker_id"]:
+                rollback.update({"active_worker": None, "mode": "IDLE"})
+                self.store.save(rollback)
+            self.ledger.append("handoff_obligation_create_failed", worker_id=owner["worker_id"], run_id=run_id, step=step)
+            raise
         return owner
 
     def run(self, *, run_id: str, step: int, staged_path: Path, worker_id: str | None = None, message_id: str | None = None, content_hash: str | None = None) -> WorkerOutcome:
         owner = self.claim(run_id=run_id, step=step, staged_path=staged_path, worker_id=worker_id, message_id=message_id, content_hash=content_hash)
         self._current_owner = owner
         outcome = WorkerOutcome(False, "worker did not complete")
-        baseline_sha = ""
+        baseline_sha: str | None = None
+        branch: str | None = None
+        remote_head: str | None = None
+        terminal_kind = "WORKER_INTERNAL_EXCEPTION"
+        terminal_error: str | None = None
         try:
-            baseline_sha = self._git_value("rev-parse", "HEAD")
+            try:
+                baseline_sha = self._git_value("rev-parse", "HEAD")
+                branch = self._git_value("branch", "--show-current")
+                try:
+                    remote_head = self._git_value("rev-parse", "origin/main")
+                except Exception as exc:
+                    if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") == "1":
+                        remote_head = baseline_sha
+                    else:
+                        terminal_kind = "GIT_PROVENANCE_FAILED"
+                        terminal_error = type(exc).__name__
+                        raise
+            except Exception as exc:
+                terminal_kind = "GIT_PROVENANCE_FAILED"
+                terminal_error = type(exc).__name__
+                raise
             instruction = (staged_path / "message.txt").read_text(encoding="utf-8")
             # Test/in-process executors retain the historical text contract.  The
             # production Codex executor receives only the staged directory so the
             # authoritative instruction never expands the worker argv.
             executor_input = staged_path if self._uses_default_executor else instruction
             outcome = self.executor(executor_input, self.config.repo_path)
-            if not outcome.ok:
-                raise RuntimeError(outcome.detail)
-            self._write_handoff(run_id, step, owner, outcome.detail, baseline_sha=baseline_sha)
-            self.ledger.append("worker_completed", worker_id=owner["worker_id"], step=step)
-            if self.watchdog_spawn:
-                try:
-                    launch = self.watchdog_spawn(step, run_id)
-                    verified = bool(launch.get("started")) if isinstance(launch, dict) else launch is not False
-                    detail = str(launch.get("detail", "")) if isinstance(launch, dict) else ""
-                except Exception as exc:
-                    verified = False
-                    detail = f"{type(exc).__name__}: {exc}"
-                update_watchdog_startup_evidence(self.config.local_project_storage, owner["worker_id"], verified, detail)
-                self.ledger.append("watchdog_start_confirmed" if verified else "watchdog_start_failed", worker_id=owner["worker_id"], step=step, detail=detail)
-            return outcome
+            if outcome.ok:
+                terminal_kind = "SUCCESS"
+            else:
+                terminal_kind = self._failure_kind(outcome.detail)
+                terminal_error = outcome.detail
         except Exception as exc:
             outcome = WorkerOutcome(False, f"{type(exc).__name__}: {exc}")
-            state = self.store.load()
-            state["last_error"] = outcome.detail
-            self.store.save(state)
-            self.ledger.append("worker_failed", worker_id=owner["worker_id"], step=step, reason=type(exc).__name__)
-            return outcome
+            terminal_error = terminal_error or type(exc).__name__
         finally:
-            state = self.store.load()
-            if state.get("active_worker", {}).get("worker_id") == owner["worker_id"]:
-                state.update({"active_worker": None, "mode": "IDLE" if not state.get("stop_requested") else "STOPPED"})
+            obligation = {"state": "RESULT_READY", "submission_verified": False}
+            try:
+                report = self._build_terminal_report(run_id, step, owner, outcome, terminal_kind,
+                                                     terminal_error, branch, baseline_sha, remote_head)
+                mark_result_ready(self.config.local_project_storage, owner["worker_id"],
+                                  outcome=terminal_kind, detail=outcome.detail,
+                                  error=terminal_error, report=report, branch=branch,
+                                  baseline_sha=baseline_sha, remote_head=remote_head)
+                obligation = attempt_handoff(self.config.local_project_storage, owner["worker_id"], self.handoff_sender)
+                verified = obligation.get("state") == "VERIFIED" and obligation.get("submission_verified") is True
+                if verified:
+                    self.ledger.append("terminal_handoff_verified", worker_id=owner["worker_id"], step=step, outcome=terminal_kind)
+                    try:
+                        write_evidence(self.config.local_project_storage, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["handoff_token"], chat_url=self.config.chat_url, send_attempts=1, submission_verified=True, watchdog_startup_verified=None)
+                    except ValueError:
+                        pass
+                    if self.watchdog_spawn:
+                        try:
+                            launch = self.watchdog_spawn(step, run_id)
+                            watchdog_verified = bool(launch.get("started")) if isinstance(launch, dict) else launch is not False
+                            watchdog_detail = str(launch.get("detail", "")) if isinstance(launch, dict) else ""
+                        except Exception as exc:
+                            watchdog_verified = False
+                            watchdog_detail = f"{type(exc).__name__}: {exc}"
+                        try:
+                            update_watchdog_startup_evidence(self.config.local_project_storage, owner["worker_id"], watchdog_verified, watchdog_detail)
+                        except ValueError:
+                            pass
+                        self.ledger.append("watchdog_start_confirmed" if watchdog_verified else "watchdog_start_failed", worker_id=owner["worker_id"], step=step, detail=watchdog_detail)
+                else:
+                    self.ledger.append("terminal_handoff_pending", worker_id=owner["worker_id"], step=step, outcome=terminal_kind)
+                self.ledger.append("worker_completed" if terminal_kind == "SUCCESS" and verified else "worker_failed", worker_id=owner["worker_id"], step=step, reason=None if terminal_kind == "SUCCESS" and verified else terminal_kind)
+                state = self.store.load()
+                state["last_error"] = None if verified and terminal_kind == "SUCCESS" else (terminal_error or "terminal handoff pending")
                 self.store.save(state)
-                self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
-            self._current_owner = None
+            except Exception as exc:
+                self.ledger.append("terminal_handoff_failed", worker_id=owner["worker_id"], step=step, reason=type(exc).__name__)
+                try:
+                    state = self.store.load()
+                    state["last_error"] = f"HANDOFF_FAILED: {type(exc).__name__}"
+                    self.store.save(state)
+                except Exception:
+                    pass
+            finally:
+                state = self.store.load()
+                if state.get("active_worker", {}).get("worker_id") == owner["worker_id"]:
+                    state.update({"active_worker": None, "mode": "IDLE" if not state.get("stop_requested") else "STOPPED"})
+                    self.store.save(state)
+                    self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
+                self._current_owner = None
+        if terminal_kind == "SUCCESS" and obligation.get("state") == "VERIFIED":
+            return outcome
+        if not outcome.ok:
+            return outcome
+        return WorkerOutcome(False, "terminal handoff not verified")
+
+    def _failure_kind(self, detail: str) -> str:
+        state = self.store.load()
+        active = state.get("active_worker") or {}
+        status = str(active.get("codex_status", ""))
+        if status == "CODEX_TIMEOUT" or "TimeoutExpired" in detail:
+            return "CODEX_TIMEOUT"
+        if active.get("codex_pid") and active.get("codex_exit_code") not in (None, 0):
+            return "CODEX_EXIT_NONZERO"
+        if status == "CODEX_START_FAILED" or not active.get("codex_pid"):
+            return "CODEX_PROCESS_CREATE_FAILED"
+        return "WORKER_INTERNAL_EXCEPTION"
+
+    def _build_terminal_report(self, run_id: str, step: int, owner: dict, outcome: WorkerOutcome,
+                               terminal_kind: str, terminal_error: str | None,
+                               branch: str | None, baseline_sha: str | None,
+                               remote_head: str | None) -> str:
+        return build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id,
+            channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"],
+            handoff_token=owner["handoff_token"], repository=str(self.config.repo_path),
+            branch=branch or "UNKNOWN", baseline_sha=baseline_sha or "UNKNOWN", remote_head=remote_head or "UNKNOWN",
+            tests=f"terminal-outcome={terminal_kind}", summary=outcome.detail or terminal_kind,
+            blockers=terminal_error or "none", next_boundary="audit terminal result and send next Gmail",
+            status="WORK_COMPLETED" if terminal_kind == "SUCCESS" else "WORKER_FAILED", error=terminal_error)
 
     def _record_codex(self, status: str, *, pid: int | None = None, exe: str | None = None, error: str | None = None, exit_code: int | None = None) -> None:
         owner = self._current_owner
@@ -180,8 +274,8 @@ class OneShotWorker:
                 process.kill()
             except (UnboundLocalError, OSError):
                 pass
-            self._record_codex("CODEX_START_FAILED", error=type(exc).__name__)
-            self.ledger.append("codex_start_failed", worker_id=owner.get("worker_id"), step=owner.get("step"), reason=type(exc).__name__)
+            self._record_codex("CODEX_TIMEOUT", error=type(exc).__name__)
+            self.ledger.append("codex_timeout", worker_id=owner.get("worker_id"), step=owner.get("step"), reason=type(exc).__name__)
             return WorkerOutcome(False, type(exc).__name__)
         except OSError as exc:
             self._record_codex("CODEX_START_FAILED", error=type(exc).__name__)
@@ -196,29 +290,6 @@ class OneShotWorker:
         if result.returncode != 0 or not value:
             raise RuntimeError(f"git provenance unavailable: {' '.join(args)}")
         return value
-
-    def _write_handoff(self, run_id: str, step: int, owner: dict, detail: str, *, baseline_sha: str) -> Path:
-        branch = self._git_value("branch", "--show-current")
-        try:
-            remote_head = self._git_value("rev-parse", "origin/main")
-        except RuntimeError:
-            # The bounded production-worker probe intentionally targets an
-            # isolated guinea-pig checkout which has no origin/main ref.  It
-            # still exercises the real post-Codex handoff call, while normal
-            # production behavior remains fail-closed on missing provenance.
-            if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") != "1":
-                raise
-            remote_head = baseline_sha
-        report = build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id, channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], repository=str(self.config.repo_path), branch=branch, baseline_sha=baseline_sha, remote_head=remote_head, tests="worker-command-exit=0", summary=detail or "bounded worker completed", blockers="none", next_boundary="audit remote and send next Gmail")
-        submission = self.handoff_sender.submit(report)
-        if not submission.ok or not submission.verified or submission.attempts != 1:
-            raise RuntimeError(f"ChatGPT handoff not verified: {submission.detail}")
-        target = self.config.local_project_storage / "handoffs" / f"{owner['worker_id']}.txt"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(report, encoding="utf-8")
-        write_evidence(self.config.local_project_storage, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], chat_url=self.config.chat_url, send_attempts=submission.attempts, submission_verified=True, watchdog_startup_verified=None)
-        return target
-
 
 class ProcessWorkerLauncher:
     """Launch one detached worker process; the worker owns its own exact PID."""

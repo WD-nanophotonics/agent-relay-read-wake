@@ -48,7 +48,7 @@ class CommandHandoffSender:
         return HandoffSubmission(verified, output[-1000:].strip() or f"exit={result.returncode}", verified=verified)
 
 
-def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None) -> str:
+def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None, status: str = "WORK_COMPLETED", error: str | None = None) -> str:
     """Build the deterministic Phase 2I return-path message."""
     next_step = step + 1 if next_step is None else next_step
     next_parent = step if next_parent is None else next_parent
@@ -69,7 +69,8 @@ def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_
         f"BASELINE_SHA: {baseline_sha}",
         f"REMOTE_HEAD: {remote_head}",
         "",
-        "STATUS: WORK_COMPLETED",
+        f"STATUS: {status}",
+        *( [f"ERROR: {error}"] if error else [] ),
         f"TESTS: {tests}",
         f"SUMMARY: {summary}",
         f"BLOCKERS: {blockers}",

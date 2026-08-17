@@ -123,6 +123,33 @@ class BrowserChatGPTSender:
                     pass
                 self.owned_process = None
 
+    def verify_token(self, token: str) -> bool:
+        """Check an existing fixed-thread token without sending another turn."""
+        if self.url != EXPECTED_CHAT_URL or not token:
+            return False
+        try:
+            from playwright.sync_api import sync_playwright
+            self._launch()
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.debug_port}")
+                if not browser.contexts:
+                    return False
+                context = browser.contexts[0]
+                page = next((item for item in context.pages if item.url.rstrip("/") == self.url.rstrip("/")), None)
+                if page is None:
+                    return False
+                return f"HANDOFF_TOKEN: {token}" in page.locator("main").inner_text(timeout=3000)
+        except Exception:
+            return False
+        finally:
+            if self.owned_process is not None:
+                try:
+                    self.owned_process.terminate()
+                    self.owned_process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                self.owned_process = None
+
 
 def main(argv=None) -> int:
     import argparse

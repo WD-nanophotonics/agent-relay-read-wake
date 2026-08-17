@@ -12,6 +12,7 @@ from .gmail import GmailGateway, GmailMessage
 from .protocol import Disposition, ProtocolEnvelope, ProtocolError, parse_envelope
 from .storage import Ledger, StateStore, stage_instruction, now
 from .ownership import exact_owner_live
+from .obligations import recover_pending_handoffs_once
 
 
 class WorkerLauncher(Protocol):
@@ -80,6 +81,10 @@ class Relay:
             return self._poll_once()
 
     def _poll_once(self) -> PollResult:
+        recovered = recover_pending_handoffs_once(self.config)
+        if any(item.get("state") != "VERIFIED" for item in recovered):
+            self.ledger.append("poll_blocked_terminal_handoff", count=len(recovered))
+            return PollResult("handoff_pending")
         state = self.store.load()
         if state.get("stop_requested"):
             self.ledger.append("poll_skipped_stop")
