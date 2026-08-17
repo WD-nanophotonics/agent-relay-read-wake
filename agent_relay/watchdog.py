@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import math
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -15,7 +16,8 @@ from uuid import uuid4
 from .ownership import exact_owner_live
 from .storage import Ledger, StateStore, atomic_json, now
 
-POLL_INTERVAL_SECONDS = 20
+WATCHDOG_WINDOW_SECONDS = 300
+POLL_INTERVAL_SECONDS = 10
 MAX_POLLS = 10
 POLL_TIMEOUT_SECONDS = 30
 WORKER_SHUTDOWN_SECONDS = 10
@@ -40,6 +42,9 @@ def _status_template(*, watchdog_id: str, pid: int | None, exe: str, run_id: str
         "updated_at": stamp, "poll_number": 0, "polls_completed": 0,
         "max_polls": MAX_POLLS, "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         "poll_timeout_seconds": POLL_TIMEOUT_SECONDS, "next_poll_at": None,
+        "service_window_seconds": WATCHDOG_WINDOW_SECONDS, "service_window_remaining_seconds": WATCHDOG_WINDOW_SECONDS,
+        "countdown_seconds": None, "poll_owner_pid": None, "poll_owner_terminated": False,
+        "poll_owner_termination_verified": False,
         "poll_started_at": None, "poll_elapsed_seconds": 0.0,
         "poll_finished_at": None, "poll_duration_seconds": None,
         "last_poll_at": None, "last_poll_action": None, "last_error": None,
@@ -110,7 +115,8 @@ def _append(ledger: Ledger, event: str, *, run_id: str, after_step: int, watchdo
 
 def spawn_watchdog_ui(config) -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog-ui"], cwd=config.repo_path, creationflags=flags, close_fds=True)
+    relay_root = Path(__file__).resolve().parents[1]
+    process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog-ui"], cwd=relay_root, creationflags=flags, close_fds=True)
     return process.pid
 
 
@@ -127,7 +133,14 @@ def spawn_watchdog(config, *, run_id: str, after_step: int) -> dict[str, Any]:
     _append(ledger, "watchdog_spawn_requested", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=os.getpid())
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     try:
-        process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog", "--run", run_id, "--after-step", str(after_step), "--watchdog-id", watchdog_id], cwd=config.repo_path, creationflags=flags, close_fds=True)
+        relay_root = Path(__file__).resolve().parents[1]
+        child_env = os.environ.copy()
+        # The managed-entry marker belongs only to the Worker that was
+        # explicitly launched by ``run-agent``.  It must not leak into the
+        # follow-up Gmail Worker and turn an ordinary message into a synthetic
+        # cursor transition.
+        child_env.pop("AGENT_RELAY_MANAGED_AGENT", None)
+        process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog", "--run", run_id, "--after-step", str(after_step), "--watchdog-id", watchdog_id], cwd=relay_root, creationflags=flags, close_fds=True, env=child_env)
     except Exception as exc:
         status.update({"status": "FAILED", "last_error": f"Popen: {type(exc).__name__}: {exc}", "finished_at": now(), "finish_reason": "spawn_failed"})
         _save_status(root, run_id, after_step, status)
@@ -192,11 +205,67 @@ def _wait_for_poll(root: Path, run_id: str, after_step: int, status: dict[str, A
         sleep(1)
 
 
-def _bounded_poll(root: Path, run_id: str, after_step: int, status: dict[str, Any], ledger: Ledger, watchdog_id: str, pid: int, poll_number: int, poll_factory, sleep: Callable[[float], None], clock: Callable[[], float], poll_timeout_seconds: int) -> tuple[Any, bool]:
+def _bounded_poll(root: Path, run_id: str, after_step: int, status: dict[str, Any], ledger: Ledger, watchdog_id: str, pid: int, poll_number: int, poll_factory, sleep: Callable[[float], None], clock: Callable[[], float], poll_timeout_seconds: int, *, poll_command: list[str] | None = None, poll_env: dict[str, str] | None = None, poll_cwd: Path | None = None) -> tuple[Any, bool]:
     status.update({"status": "POLLING", "poll_number": poll_number, "poll_started_at": now(), "poll_elapsed_seconds": 0.0, "poll_finished_at": None, "poll_duration_seconds": None, "countdown_seconds": None, "next_poll_at": None})
     _save_status(root, run_id, after_step, status)
     _append(ledger, "watchdog_poll_started", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=poll_number)
     started = clock()
+    if poll_command is not None:
+        # Production polls have a killable OS owner.  A Python daemon thread
+        # cannot be terminated after timeout and is therefore reserved for
+        # deterministic in-process fake-clock certification only.
+        process = subprocess.Popen(poll_command, cwd=str(poll_cwd) if poll_cwd else None,
+                                   env=poll_env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        status.update({"poll_owner_pid": process.pid, "poll_owner_terminated": False,
+                       "poll_owner_termination_verified": False})
+        _save_status(root, run_id, after_step, status)
+        while process.poll() is None:
+            elapsed = max(0.0, clock() - started)
+            status["poll_elapsed_seconds"] = round(elapsed, 1)
+            _save_status(root, run_id, after_step, status)
+            if elapsed >= poll_timeout_seconds:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                termination_deadline = time.monotonic() + 5
+                while process.poll() is None and time.monotonic() < termination_deadline:
+                    time.sleep(0.05)
+                terminated = process.poll() is not None
+                status.update({"poll_owner_terminated": True,
+                               "poll_owner_termination_verified": terminated,
+                               "status": "POLL_TIMEOUT",
+                               "poll_elapsed_seconds": round(max(0.0, clock() - started), 1),
+                               "poll_finished_at": now(),
+                               "poll_duration_seconds": round(max(0.0, clock() - started), 1),
+                               "last_poll_at": now(), "last_poll_action": "POLL_TIMEOUT",
+                               "last_error": f"poll exceeded {poll_timeout_seconds}s" if terminated else "poll owner termination unverified"})
+                _save_status(root, run_id, after_step, status)
+                _append(ledger, "watchdog_poll_timeout", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=poll_number, error=status["last_error"], poll_owner_pid=process.pid, termination_verified=terminated)
+                return None, True
+            time.sleep(0.05)
+        stdout, stderr = process.communicate()
+        duration = max(0.0, clock() - started)
+        status.update({"poll_elapsed_seconds": round(duration, 1), "poll_finished_at": now(),
+                       "poll_duration_seconds": round(duration, 1), "last_poll_at": now()})
+        if process.returncode != 0:
+            status.update({"last_poll_action": "FAILED", "last_error": (stderr or f"poll exit={process.returncode}").strip()[-1000:]})
+            _save_status(root, run_id, after_step, status)
+            return None, False
+        try:
+            from .relay import PollResult
+            payload = json.loads(stdout or "{}")
+            result = PollResult(payload.get("action", "FAILED"), payload.get("message_id"), Path(payload["staged_path"]) if payload.get("staged_path") else None, payload.get("worker"))
+        except Exception as exc:
+            status.update({"last_poll_action": "FAILED", "last_error": f"invalid poll result: {type(exc).__name__}"})
+            _save_status(root, run_id, after_step, status)
+            return None, False
+        status.update({"last_poll_action": result.action, "last_error": None, "polls_completed": poll_number})
+        _save_status(root, run_id, after_step, status)
+        _append(ledger, "watchdog_poll_finished", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=poll_number, action=result.action, duration_seconds=round(duration, 1))
+        return result, False
     done = threading.Event()
     box: dict[str, Any] = {}
 
@@ -307,7 +376,7 @@ def _wait_for_worker_chain(root: Path, run_id: str, after_step: int, status: dic
         sleep(0.5)
 
 
-def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=time.sleep, watchdog_id: str | None = None, ui_spawn=None, clock=time.monotonic, poll_interval_seconds: int = POLL_INTERVAL_SECONDS, max_polls: int = MAX_POLLS, poll_timeout_seconds: int = POLL_TIMEOUT_SECONDS) -> str:
+def run_watchdog(config, *, run_id: str, after_step: int, poll_factory=None, sleep=time.sleep, watchdog_id: str | None = None, ui_spawn=None, clock=time.monotonic, poll_interval_seconds: int = POLL_INTERVAL_SECONDS, max_polls: int | None = None, poll_timeout_seconds: int = POLL_TIMEOUT_SECONDS, service_window_seconds: int = WATCHDOG_WINDOW_SECONDS, poll_command: list[str] | None = None, poll_env: dict[str, str] | None = None, poll_cwd: Path | None = None) -> str:
     root = config.local_project_storage
     ledger = Ledger(root)
     watchdog_id = watchdog_id or str(uuid4())
@@ -329,14 +398,31 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=ti
             _save_status(root, run_id, after_step, status)
             _append(ledger, "watchdog_ui_failed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, error=status["ui_error"])
         state_store = StateStore(root)
-        status.update({"max_polls": max_polls, "poll_interval_seconds": poll_interval_seconds, "poll_timeout_seconds": poll_timeout_seconds})
+        status.update({"max_polls": max_polls if max_polls is not None else 0, "poll_interval_seconds": poll_interval_seconds, "poll_timeout_seconds": poll_timeout_seconds, "service_window_seconds": service_window_seconds})
         _save_status(root, run_id, after_step, status)
-        for poll_number in range(1, max_polls + 1):
+        started_clock = clock()
+        deadline = started_clock + service_window_seconds
+        poll_number = 0
+        while True:
+            if max_polls is not None:
+                if poll_number >= max_polls:
+                    break
+            elif clock() >= deadline:
+                break
+            status["service_window_remaining_seconds"] = max(0, int(math.ceil(deadline - clock())))
+            _save_status(root, run_id, after_step, status)
             if not _wait_for_poll(root, run_id, after_step, status, sleep, clock, state_store, poll_interval_seconds):
                 return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "STOPPED", "stop_requested", return_value="stopped")
-            result, timed_out = _bounded_poll(root, run_id, after_step, status, ledger, watchdog_id, pid, poll_number, poll_factory, sleep, clock, poll_timeout_seconds)
+            poll_number += 1
+            result, timed_out = _bounded_poll(root, run_id, after_step, status, ledger, watchdog_id, pid, poll_number, poll_factory, sleep, clock, poll_timeout_seconds, poll_command=poll_command, poll_env=poll_env, poll_cwd=poll_cwd)
             if timed_out:
-                if poll_number == max_polls:
+                # A production subprocess is killable and verified above.  An
+                # in-process test double has no supported thread-termination
+                # primitive; fail closed instead of beginning another poll
+                # while the old operation might still be alive.
+                if status.get("poll_owner_termination_verified") is not True:
+                    return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FAILED", "poll_owner_termination_unverified", return_value="failed")
+                if max_polls is not None and poll_number >= max_polls:
                     break
                 continue
             if result is None:
@@ -357,9 +443,10 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=ti
                 return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "ADVANCED", "protocol_advanced", return_value="advanced")
             status["status"] = "IDLE"
             _save_status(root, run_id, after_step, status)
-        status.update({"status": "NO_WAKE_FOUND", "polls_completed": max_polls, "last_poll_action": status.get("last_poll_action") or "IDLE", "closing_countdown_seconds": NO_WAKE_SHUTDOWN_SECONDS})
+        completed = poll_number
+        reason = f"no_matching_wake_after_{completed}_polls" if max_polls is not None else "no_matching_wake_after_service_window"
+        status.update({"status": "NO_WAKE_FOUND", "polls_completed": completed, "last_poll_action": status.get("last_poll_action") or "IDLE", "service_window_remaining_seconds": 0, "closing_countdown_seconds": NO_WAKE_SHUTDOWN_SECONDS})
         _save_status(root, run_id, after_step, status)
-        reason = f"no_matching_wake_after_{max_polls}_polls"
-        _append(ledger, "watchdog_exhausted", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=max_polls, reason=reason)
+        _append(ledger, "watchdog_exhausted", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=completed, reason=reason)
         _countdown(root, run_id, after_step, status, NO_WAKE_SHUTDOWN_SECONDS, sleep, clock)
         return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FINISHED", reason, return_value="exhausted")

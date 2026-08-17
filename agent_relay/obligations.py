@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 import json
 
-from .handoff import build_actionable_report
+from .handoff import build_actionable_report, ACTION_SEND_RECOVERY
 from .ownership import exact_owner_live
 from .storage import atomic_json, now
 
@@ -167,7 +167,8 @@ def recover_pending_handoffs_once(config: Any, *, sender: Any | None = None) -> 
                 remote_head=str(value.get("remote_head") or "UNKNOWN"),
                 tests="worker-terminal-state-recovered", summary=detail,
                 blockers=detail, next_boundary="audit recovered terminal result",
-                status="WORKER_FAILED", error=detail)
+                status="WORKER_FAILED", error=detail,
+                action_required=ACTION_SEND_RECOVERY)
             mark_result_ready(root, worker_id, outcome="WORKER_INTERNAL_EXCEPTION",
                               detail=detail, error=detail, report=report,
                               branch=value.get("branch"), baseline_sha=value.get("baseline_sha"),

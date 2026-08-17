@@ -86,8 +86,14 @@ def run_one(label: str, repo: Path, task: str, root: Path) -> dict:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="agentrelay-managed-agent-") as temp:
-        root = Path(temp)
+    # Diagnostics may be disposable, but the follow-up watchdog is live
+    # ownership state and must outlive the Worker process.  Keep this bounded
+    # certification root under the normal local runtime area instead of a
+    # TemporaryDirectory that disappears immediately after the worker exits.
+    live_root = ROOT / ".agentrelay-live-cert" / uuid4().hex
+    live_root.mkdir(parents=True, exist_ok=True)
+    root = live_root
+    try:
         nonce = f"MANAGED-MECHANICS-{uuid4()}"
         mechanics_head = git(MECHANICS, "rev-parse", "HEAD")
         mechanics_task = f"Inspect this local repository and return a concise final result. Record nonce={nonce}, cwd, git branch, git HEAD, and git status --short. Do not modify source, do not run tests, do not commit, and do not push. Include the exact facts and the marker MANAGED_MECHANICS_COMPLETE {nonce}."
@@ -103,6 +109,8 @@ def main() -> int:
         assert self_hosted["repo_head"] == relay_head and "MANAGED_RELAY_COMPLETE" in self_hosted["report"] and self_nonce in self_hosted["report"]
         print("SELF_HOSTED_RELAY_AGENT_TERMINAL_HANDOFF_PASS")
         print(json.dumps({"label": "self-hosted-relay", "worker_id": self_hosted["worker_id"], "worker_pid": self_hosted["worker_pid"], "token": self_hosted["token"], "head": self_hosted["repo_head"], "branch": self_hosted["repo_branch"], "status": self_hosted["repo_status"]}, sort_keys=True))
+    finally:
+        print(f"LIVE_FOLLOWUP_OWNER_ROOT={root}")
     print("MANAGED_AGENT_ENTRY_PASS")
     print("CODEX_HANDOFF_MEMORY_IRRELEVANT_PASS")
     print("NO_USER_COURIER_PASS")

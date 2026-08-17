@@ -19,3 +19,4 @@ agent-relay-runtime/
 # Never commit the canonical local AgentRelay project tree if it is redirected
 # into this checkout during development.
 agent_relay_runtime/
+.agentrelay-live-cert/

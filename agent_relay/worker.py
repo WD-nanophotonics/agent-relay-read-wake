@@ -61,9 +61,14 @@ class OneShotWorker:
         owner["handoff_token"] = f"AR-HANDOFF-{owner['worker_id']}"
         owner.update({"codex_status": "NOT_STARTED", "codex_pid": None, "codex_exe": None})
         state.update({"mode": "BUSY", "active_worker": owner, "pending_worker": None, "last_error": None})
-        if message_id:
+        # A managed ``run-agent`` has no Gmail message id, but it still owns a
+        # real logical cursor.  Advance that cursor only after the child has
+        # claimed the pending owner; ordinary Gmail workers retain the
+        # consumed-message acknowledgement semantics.
+        managed_entry = os.environ.get("AGENT_RELAY_MANAGED_AGENT") == "1"
+        if message_id or managed_entry:
             consumed = set(state.get("consumed_message_ids", [])); consumed.add(message_id)
-            state["consumed_message_ids"] = sorted(consumed)
+            state["consumed_message_ids"] = sorted(item for item in consumed if item)
             state["current_run"] = run_id
             state["expected_step"] = step + 1
             state["expected_parent"] = owner["step"]
@@ -118,6 +123,13 @@ class OneShotWorker:
             outcome = self.executor(executor_input, self.config.repo_path)
             try:
                 ending_sha = self._git_value("rev-parse", "HEAD")
+                try:
+                    remote_head = self._git_value("rev-parse", "origin/main")
+                except Exception:
+                    # A non-main guinea-pig branch may not have origin/main;
+                    # preserve the explicit UNKNOWN provenance instead of
+                    # claiming a remote verification that did not occur.
+                    remote_head = None
                 status_result = subprocess.run(["git", "-C", str(self.config.repo_path), "status", "--short"], capture_output=True, text=True, timeout=15, check=False)
                 changed_files = (status_result.stdout or "").strip() or "clean"
             except Exception:
@@ -135,6 +147,7 @@ class OneShotWorker:
             terminal_error = terminal_error or type(exc).__name__
         finally:
             obligation = {"state": "RESULT_READY", "submission_verified": False}
+            continuation_ok = True
             try:
                 report = self._build_terminal_report(run_id, step, owner, outcome, terminal_kind,
                                                      terminal_error, branch, baseline_sha, remote_head,
@@ -166,11 +179,13 @@ class OneShotWorker:
                         except ValueError:
                             pass
                         self.ledger.append("watchdog_start_confirmed" if watchdog_verified else "watchdog_start_failed", worker_id=owner["worker_id"], step=step, detail=watchdog_detail)
+                        continuation_ok = watchdog_verified
                 else:
                     self.ledger.append("terminal_handoff_pending", worker_id=owner["worker_id"], step=step, outcome=terminal_kind)
-                self.ledger.append("worker_completed" if terminal_kind == "SUCCESS" and verified else "worker_failed", worker_id=owner["worker_id"], step=step, reason=None if terminal_kind == "SUCCESS" and verified else terminal_kind)
+                lifecycle_ok = terminal_kind == "SUCCESS" and verified and continuation_ok
+                self.ledger.append("worker_completed" if lifecycle_ok else "worker_failed", worker_id=owner["worker_id"], step=step, reason=None if lifecycle_ok else (terminal_kind if not continuation_ok else terminal_kind))
                 state = self.store.load()
-                state["last_error"] = None if verified and terminal_kind == "SUCCESS" else (terminal_error or "terminal handoff pending")
+                state["last_error"] = None if lifecycle_ok else ("FOLLOWUP_OWNER_FAILED" if verified and not continuation_ok else (terminal_error or "terminal handoff pending"))
                 self.store.save(state)
             except Exception as exc:
                 self.ledger.append("terminal_handoff_failed", worker_id=owner["worker_id"], step=step, reason=type(exc).__name__)
@@ -187,7 +202,7 @@ class OneShotWorker:
                     self.store.save(state)
                     self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
                 self._current_owner = None
-        if terminal_kind == "SUCCESS" and obligation.get("state") == "VERIFIED":
+        if terminal_kind == "SUCCESS" and obligation.get("state") == "VERIFIED" and continuation_ok:
             return outcome
         if not outcome.ok:
             return outcome

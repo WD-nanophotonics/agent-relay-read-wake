@@ -123,6 +123,22 @@ class Relay:
                 continue
             candidates.append((env.step, message_id, msg, env, message_hash(msg)))
         candidates.sort(key=lambda item: (item[0], item[1]))
+        # A logical step is identified by the validated envelope identity, not
+        # by Gmail arrival order.  Two different body hashes for that identity
+        # are preserved as a fail-closed conflict; neither message is
+        # consumed, staged, or launched.
+        grouped: dict[tuple[str, int, int, str], list[tuple[int, str, GmailMessage, ProtocolEnvelope, str]]] = {}
+        for candidate in candidates:
+            env = candidate[3]
+            grouped.setdefault((env.channel_id, env.step, env.parent, env.project_id), []).append(candidate)
+        for logical_identity, group in grouped.items():
+            hashes = {item[4] for item in group}
+            if len(hashes) > 1:
+                details = [{"message_id": item[1], "body_hash": item[4]} for item in group]
+                state["last_error"] = f"conflicting logical-step content: {logical_identity}"
+                self.store.save(state)
+                self.ledger.append("conflict_fail_closed", logical_identity=logical_identity, candidates=details)
+                return PollResult("conflict", group[0][1])
         for step, message_id, msg, env, content_hash in candidates:
             if step < expected:
                 self.ledger.append("old_message_ignored", message_id=message_id, step=step)

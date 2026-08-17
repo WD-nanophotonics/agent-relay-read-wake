@@ -76,7 +76,9 @@ def main(argv=None) -> int:
         return 0
     if args.command == "poll-once":
         result = Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()).poll_once()
-        print(json.dumps({"action": result.action, "message_id": result.message_id}, sort_keys=True))
+        print(json.dumps({"action": result.action, "message_id": result.message_id,
+                          "staged_path": str(result.staged_path) if result.staged_path else None,
+                          "worker": result.worker}, sort_keys=True))
         return 0
     if args.command == "run-agent":
         if not args.staged:
@@ -118,7 +120,10 @@ def main(argv=None) -> int:
         if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") == "1":
             worker = OneShotWorker(config, handoff_sender=_DiagnosticHandoffSink(), watchdog_spawn=None)
         elif os.environ.get("AGENT_RELAY_MANAGED_AGENT") == "1":
-            worker = OneShotWorker(config, watchdog_spawn=None)
+            # A managed Agent must leave exactly one bounded follow-up owner
+            # after its terminal handoff.  The watchdog is not a supervisor;
+            # it is the short-lived continuation window for the next Gmail.
+            worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
         else:
             worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
         outcome = worker.run(run_id=args.run, step=args.step, staged_path=Path(args.staged), worker_id=args.worker_id, message_id=args.message_id, content_hash=args.content_hash)
@@ -127,7 +132,12 @@ def main(argv=None) -> int:
     if args.command == "watchdog":
         if not args.run or args.after_step is None:
             parser.error("watchdog requires --run and --after-step")
-        result = run_watchdog(config, run_id=args.run, after_step=args.after_step, watchdog_id=args.watchdog_id, poll_factory=lambda: Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()))
+        relay_root = Path(__file__).resolve().parents[1]
+        poll_env = os.environ.copy()
+        result = run_watchdog(config, run_id=args.run, after_step=args.after_step,
+                              watchdog_id=args.watchdog_id, poll_factory=None,
+                              poll_command=[os.sys.executable, "-m", "agent_relay.cli", "poll-once"],
+                              poll_env=poll_env, poll_cwd=relay_root)
         print(f"WATCHDOG_{result.upper()}")
         return 0
     if args.command in {"watchdog-ui", "monitor"}:

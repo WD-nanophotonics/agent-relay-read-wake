@@ -11,6 +11,10 @@ from .storage import atomic_json, now
 
 
 PROTOCOL = "AGENTRELAY_HANDOFF/1"
+RETURN_PROTOCOL = "AGENTRELAY_CHATGPT_RETURN/1"
+ACTION_SEND_NEXT = "SEND_NEXT_GMAIL"
+ACTION_SEND_RECOVERY = "SEND_RECOVERY_GMAIL"
+ACTION_HUMAN = "HUMAN_REQUIRED"
 
 
 class HandoffSubmission:
@@ -48,12 +52,55 @@ class CommandHandoffSender:
         return HandoffSubmission(verified, output[-1000:].strip() or f"exit={result.returncode}", verified=verified)
 
 
-def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None, status: str = "WORK_COMPLETED", error: str | None = None, starting_sha: str | None = None, ending_sha: str | None = None, exit_code: int | None = None, terminal_outcome: str | None = None, changed_files: str | None = None) -> str:
+def validate_return_envelope(report: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in report.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            if key.strip() in {"PROTOCOL", "CHANNEL", "RUN", "STEP", "PROJECT", "ACTION_REQUIRED", "NEXT_STEP", "NEXT_PARENT", "RESPONSE_CONTRACT", "HANDOFF_TOKEN"}:
+                fields[key.strip()] = value.strip()
+    required = {"PROTOCOL", "CHANNEL", "RUN", "STEP", "PROJECT", "ACTION_REQUIRED", "NEXT_STEP", "NEXT_PARENT", "RESPONSE_CONTRACT", "HANDOFF_TOKEN"}
+    if set(fields) != required or fields["PROTOCOL"] != RETURN_PROTOCOL:
+        raise ValueError("malformed actionable return envelope")
+    if fields["ACTION_REQUIRED"] not in {ACTION_SEND_NEXT, ACTION_SEND_RECOVERY, ACTION_HUMAN}:
+        raise ValueError("invalid return action")
+    expected_contract = "HUMAN_REQUIRED" if fields["ACTION_REQUIRED"] == ACTION_HUMAN else "GMAIL_REQUIRED"
+    if fields["RESPONSE_CONTRACT"] != expected_contract:
+        raise ValueError("return response contract does not match action")
+    if fields["ACTION_REQUIRED"] != ACTION_HUMAN:
+        if not fields["CHANNEL"].startswith("AR-") or not fields["RUN"].startswith("RUN-") or not fields["PROJECT"] or not fields["NEXT_STEP"].isdigit() or not fields["NEXT_PARENT"].isdigit():
+            raise ValueError("invalid actionable return identity")
+    return fields
+
+
+def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None, status: str = "WORK_COMPLETED", error: str | None = None, starting_sha: str | None = None, ending_sha: str | None = None, exit_code: int | None = None, terminal_outcome: str | None = None, changed_files: str | None = None, action_required: str = ACTION_SEND_NEXT, response_contract: str = "GMAIL_REQUIRED") -> str:
     """Build the deterministic Phase 2I return-path message."""
     next_step = step + 1 if next_step is None else next_step
     next_parent = step if next_parent is None else next_parent
-    return "\n".join([
+    instructions = (
+        [
+            "CHATGPT MUST:",
+            "1. Audit the remote GitHub result before deciding the next task.",
+            "2. Decide the next bounded task from the audited repository state.",
+            "3. Generate the authoritative next AgentRelay instruction.",
+            "4. SEND it immediately through Gmail in this same ChatGPT turn.",
+            "5. Use the same CHANNEL / RUN / PROJECT.",
+            "6. Use STEP = NEXT_STEP and PARENT = NEXT_PARENT exactly.",
+            "7. Use DISPOSITION: WAKE when work should continue.",
+            "8. Use DISPOSITION: HUMAN_REQUIRED if audit shows the loop must stop for human intervention.",
+            "9. Do not merely draft the email.",
+            "10. Do not ask the user to copy or forward anything.",
+            "11. Do not wait for another user message before sending Gmail.",
+            "12. After sending Gmail, end the ChatGPT turn. Do not wait for Codex.",
+        ] if action_required != ACTION_HUMAN else [
+            "CHATGPT MUST:",
+            "1. Treat this as a genuine human-only boundary.",
+            "2. Do not invent or send a follow-up Gmail until the human boundary is resolved.",
+        ]
+    )
+    report = "\n".join([
         "AGENTRELAY_CHATGPT_HANDOFF/1",
+        f"PROTOCOL: {RETURN_PROTOCOL}",
         "",
         f"CHANNEL: {channel_id}",
         f"RUN: {run_id}",
@@ -81,24 +128,15 @@ def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_
         f"BLOCKERS: {blockers}",
         f"SUGGESTED_NEXT_BOUNDARY: {next_boundary}",
         "",
-        "ACTION_REQUIRED: AUDIT_REMOTE_AND_SEND_NEXT_GMAIL",
+        f"ACTION_REQUIRED: {action_required}",
         f"NEXT_STEP: {next_step:04d}",
         f"NEXT_PARENT: {next_parent:04d}",
+        f"RESPONSE_CONTRACT: {response_contract}",
         "",
-        "CHATGPT MUST:",
-        "1. Audit the remote GitHub result before deciding the next task.",
-        "2. Decide the next bounded task from the audited repository state.",
-        "3. Generate the authoritative next AgentRelay instruction.",
-        "4. SEND it immediately through Gmail in this same ChatGPT turn.",
-        "5. Use the same CHANNEL / RUN / PROJECT.",
-        "6. Use STEP = NEXT_STEP and PARENT = NEXT_PARENT exactly.",
-        "7. Use DISPOSITION: WAKE when work should continue.",
-        "8. Use DISPOSITION: HUMAN_REQUIRED if audit shows the loop must stop for human intervention.",
-        "9. Do not merely draft the email.",
-        "10. Do not ask the user to copy or forward anything.",
-        "11. Do not wait for another user message before sending Gmail.",
-        "12. After sending Gmail, end the ChatGPT turn. Do not wait for Codex.",
+        *instructions,
     ])
+    validate_return_envelope(report)
+    return report
 
 
 def evidence_path(project_storage: Path, lease_id: str) -> Path:
