@@ -115,11 +115,6 @@ def _append(ledger: Ledger, event: str, *, run_id: str, after_step: int, watchdo
 
 def spawn_watchdog_ui(config) -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    # When the caller itself is running inside a Windows job (as the desktop
-    # host may do), ask for a breakaway so the five-minute owner is not killed
-    # merely because the short-lived launcher exits.  Fall back cleanly on
-    # hosts that disallow breakaway.
-    breakaway = 0x01000000 if os.name == "nt" else 0
     relay_root = Path(__file__).resolve().parents[1]
     process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog-ui"], cwd=relay_root, creationflags=flags, close_fds=True)
     return process.pid
@@ -141,6 +136,9 @@ def spawn_watchdog(config, *, run_id: str, after_step: int) -> dict[str, Any]:
     # parent.  The process is still independently owned by the exact PID lock
     # and the UI remains a normal taskbar window.
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # Ask Windows to break away from a short-lived launcher job when allowed;
+    # fall back below on hosts that disallow it.
+    breakaway = 0x01000000 if os.name == "nt" else 0
     try:
         relay_root = Path(__file__).resolve().parents[1]
         child_env = os.environ.copy()
