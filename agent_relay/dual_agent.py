@@ -104,17 +104,28 @@ def _wait_verified(root: Path, role: str, nonce: str) -> None:
     raise RuntimeError("parent did not verify startup ACK")
 
 
+def _result_text(value: dict) -> str:
+    """Return the exact durable terminal result without putting it on argv."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def controller(root: Path, nonce: str, parent_death: bool) -> None:
     _owner(root, "A", nonce, "STARTED"); _ack(root, "A", nonce)
-    _wait_verified(root, "A", nonce) if (root / "inbox" / nonce).exists() else None
     task = root / "inbox" / nonce
     result = root / "results" / f"{nonce}.result.json"
+    # A only waits for B's startup verification when it is the returning A.
+    # A raw ChatGPT task also already has an inbox directory, so using that as
+    # the discriminator would deadlock the first handoff.
+    _wait_verified(root, "A", nonce) if result.exists() else None
     if not task.exists():
         payload = f"harmless nonce task {nonce}\n".encode()
         atomic_json(task / "manifest.json", {"nonce": nonce, "payload_sha256": _sha(payload), "created_by": "A"})
         (task / "payload.md").parent.mkdir(parents=True, exist_ok=True)
         (task / "payload.md").write_bytes(payload)
         _event(root, "task_written", role="A", nonce=nonce)
+    if not result.exists():
+        # This is either A's locally-created task or a raw ChatGPT turn which
+        # was already durably published by the read-only bridge.
         child = spawn_peer(root, "B", nonce, parent_death=parent_death)
         _wait_ack(root, "B", nonce, child.pid)
         _event(root, "parent_exit_after_ack", role="A", nonce=nonce, child_pid=child.pid, parent_death=parent_death)
@@ -127,6 +138,14 @@ def controller(root: Path, nonce: str, parent_death: bool) -> None:
     manifest = _json(task / "manifest.json")
     if value.get("nonce") != nonce or value.get("payload_sha256") != manifest.get("payload_sha256"):
         raise RuntimeError("result hash/nonce mismatch")
+    # A configured bridge is deliberately invoked only by the returning A:
+    # B can neither access nor semantically transform the ChatGPT payload.
+    bridge = root / "chatgpt" / "bridge.json"
+    if bridge.exists():
+        from .chatgpt_bridge import submit_durable_result
+        delivery = submit_durable_result(root, nonce, _result_text(value))
+        if not delivery.get("verified"):
+            raise RuntimeError("fixed ChatGPT result delivery was not verified")
     atomic_json(root / "terminal" / f"{nonce}.json", {"nonce": nonce, "state": "COMPLETE", "at": now()})
     _event(root, "cycle_complete", role="A", nonce=nonce)
 
