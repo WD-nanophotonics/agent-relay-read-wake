@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent_relay.gmail import GmailMessage
 from agent_relay.protocol import parse_envelope
 from agent_relay.storage import stage_instruction
+from agent_relay.watchdog import load_watchdog_status
+from gmail_courier.config import home_dir
 
 ROOT = Path(__file__).resolve().parents[1]
 MECHANICS = Path(r"C:\Users\icywo\Documents\ChatGPT\test mechanics sim")
@@ -40,7 +42,7 @@ target_label = "externally owned bounded Agent"
 chat_url = "https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9"
 poll_interval = 20
 enabled = true
-gmail_auth_home = "{(home / 'gmail').as_posix()}"
+gmail_auth_home = "{home_dir().as_posix()}"
 codex_command = "codex.cmd"
 handoff_command = ""
 '''
@@ -85,6 +87,23 @@ def run_one(label: str, repo: Path, task: str, root: Path) -> dict:
     return {"label": label, "run_id": run_id, "worker_id": worker_id, "worker_pid": launch["worker"]["pid"], "token": obligation["handoff_token"], "report": report, "repo_head": git(repo, "rev-parse", "HEAD"), "repo_branch": git(repo, "branch", "--show-current"), "repo_status": git(repo, "status", "--short")}
 
 
+def verify_followup_window(root: Path, result: dict) -> None:
+    storage = root / result["label"] / "storage"
+    deadline = time.monotonic() + 360
+    while time.monotonic() < deadline:
+        status = load_watchdog_status(storage, result["run_id"], 1)
+        if status and status.get("status") == "FINISHED":
+            assert status.get("service_window_seconds") == 300
+            assert status.get("poll_interval_seconds") == 10
+            assert status.get("polls_completed", 0) >= 10
+            assert status.get("finish_reason") == "no_matching_wake_after_service_window"
+            print("SINGLE_FOLLOWUP_OWNER_PASS")
+            print("WATCHDOG_300S_10S_PASS")
+            return
+        time.sleep(1)
+    raise TimeoutError("follow-up owner did not complete its bounded service window")
+
+
 def main() -> int:
     # Diagnostics may be disposable, but the follow-up watchdog is live
     # ownership state and must outlive the Worker process.  Keep this bounded
@@ -101,6 +120,7 @@ def main() -> int:
         assert mechanics["repo_head"] == mechanics_head and mechanics["repo_branch"] == "sandbox" and "MANAGED_MECHANICS_COMPLETE" in mechanics["report"] and nonce in mechanics["report"]
         print("REAL_MANAGED_AGENT_TERMINAL_HANDOFF_PASS")
         print(json.dumps({"label": "mechanics", "worker_id": mechanics["worker_id"], "worker_pid": mechanics["worker_pid"], "token": mechanics["token"], "head": mechanics["repo_head"], "branch": mechanics["repo_branch"], "status": mechanics["repo_status"]}, sort_keys=True))
+        verify_followup_window(root, mechanics)
 
         self_nonce = f"MANAGED-RELAY-{uuid4()}"
         relay_head = git(ROOT, "rev-parse", "HEAD")

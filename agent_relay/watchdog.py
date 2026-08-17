@@ -135,7 +135,7 @@ def spawn_watchdog(config, *, run_id: str, after_step: int) -> dict[str, Any]:
     # detached job that some Windows hosts terminate with its short-lived
     # parent.  The process is still independently owned by the exact PID lock
     # and the UI remains a normal taskbar window.
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     # Ask Windows to break away from a short-lived launcher job when allowed;
     # fall back below on hosts that disallow it.
     breakaway = 0x01000000 if os.name == "nt" else 0
