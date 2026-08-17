@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -22,6 +23,11 @@ class WatchdogMonitorModel:
         if watchdog:
             watchdog = dict(watchdog)
             watchdog["alive"] = bool(watchdog.get("pid") and exact_owner_live(watchdog))
+            try:
+                started = datetime.fromisoformat(watchdog["started_at"])
+                watchdog["total_elapsed_seconds"] = max(0, int((datetime.now(started.tzinfo) - started).total_seconds()))
+            except (KeyError, TypeError, ValueError):
+                watchdog["total_elapsed_seconds"] = None
             next_poll = watchdog.get("next_poll_at")
             if next_poll:
                 try:
@@ -29,6 +35,14 @@ class WatchdogMonitorModel:
                     watchdog["countdown_seconds"] = max(0, int((target - datetime.now(target.tzinfo)).total_seconds()))
                 except (TypeError, ValueError):
                     watchdog["countdown_seconds"] = None
+            if watchdog.get("status") == "POLLING" and watchdog.get("poll_started_at"):
+                try:
+                    poll_started = datetime.fromisoformat(watchdog["poll_started_at"])
+                    watchdog["polling_for_seconds"] = max(0, round((datetime.now(poll_started.tzinfo) - poll_started).total_seconds(), 1))
+                except (TypeError, ValueError):
+                    watchdog["polling_for_seconds"] = None
+            else:
+                watchdog["polling_for_seconds"] = None
         return {"watchdog": watchdog, "relay": state}
 
 
@@ -57,11 +71,14 @@ def run_watchdog_ui(config) -> int:
         ("Status", "status"), ("RUN", "run_id"), ("After STEP", "after_step"),
         ("PID / alive-dead", "pid_alive"), ("Started at", "started_at"),
         ("UI PID", "ui_pid"),
-        ("Attempt", "attempt"), ("Next poll time", "next_poll_at"),
-        ("Countdown / seconds remaining", "countdown_seconds"), ("Relay mode", "relay_mode"),
+        ("Poll", "poll"), ("Next Gmail check in", "countdown_seconds"),
+        ("Total elapsed", "total_elapsed_seconds"), ("Polling for", "polling_for_seconds"),
+        ("Relay mode", "relay_mode"),
         ("Expected STEP", "expected_step"), ("Active/pending Worker", "worker"),
-        ("Last poll time", "last_poll_at"), ("Last poll result", "last_poll_action"),
-        ("Last error", "last_error"), ("Finished reason", "finish_reason"),
+        ("Last check", "last_poll_at"), ("Last poll result", "last_poll_action"),
+        ("Last duration", "poll_duration_seconds"), ("Last error", "last_error"),
+        ("Closing monitor in", "closing_countdown_seconds"), ("Worker PID", "worker_pid"),
+        ("Finished reason", "finish_reason"),
     ]
     values: dict[str, ttk.Label] = {}
     frame = ttk.Frame(root, padding=12)
@@ -92,7 +109,8 @@ def run_watchdog_ui(config) -> int:
             values["run_id"].configure(text=watchdog.get("run_id", "-"))
             values["after_step"].configure(text=f"{int(watchdog.get('after_step', 0)):04d}")
             values["pid_alive"].configure(text=f"{watchdog.get('pid', '-')} / {'alive' if watchdog.get('alive') else 'dead'}")
-            for key in ("started_at", "ui_pid", "attempt", "next_poll_at", "countdown_seconds", "last_poll_at", "last_poll_action", "last_error", "finish_reason"):
+            values["poll"].configure(text=f"{watchdog.get('poll_number', 0)} / {watchdog.get('max_polls', 10)}")
+            for key in ("started_at", "ui_pid", "countdown_seconds", "total_elapsed_seconds", "polling_for_seconds", "last_poll_at", "last_poll_action", "poll_duration_seconds", "last_error", "closing_countdown_seconds", "worker_pid", "finish_reason"):
                 values[key].configure(text=str(watchdog.get(key) if watchdog.get(key) is not None else "-"))
         values["relay_mode"].configure(text=relay.get("mode", "-"))
         values["expected_step"].configure(text=str(relay.get("expected_step", "-")))

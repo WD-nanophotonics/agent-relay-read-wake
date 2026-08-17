@@ -37,21 +37,27 @@ def _walk_parts(payload: dict[str, Any]):
 class GoogleGmailGateway:
     def __init__(self, auth_home):
         self.service = gmail_service(auth_home)
+        self.request_timeout = 25
+        # google-api-python-client delegates transport to an httplib2-like
+        # object. Set its socket timeout when available; parser validation
+        # remains the final authorization boundary.
+        for transport in (getattr(self.service, "_http", None), getattr(getattr(self.service, "_http", None), "http", None)):
+            if transport is not None and hasattr(transport, "timeout"):
+                transport.timeout = self.request_timeout
 
     def test_connection(self) -> None:
-        self.service.users().getProfile(userId="me").execute()
+        self.service.users().getProfile(userId="me").execute(num_retries=0)
 
     def list_messages(self) -> list[str]:
-        # Deliberately broad: protocol validation, not Gmail search syntax, controls routing.
+        # Coarse candidate filter only. Exact protocol parsing below still
+        # validates CHANNEL/RUN/STEP/PARENT/DISPOSITION/PROJECT.
         ids: list[str] = []
         token = None
-        # A poll is still one fetch cycle; pagination only prevents a valid
-        # authoritative WAKE from being hidden behind unrelated Inbox mail.
-        for _ in range(20):
-            params = {"userId": "me", "q": "in:inbox", "maxResults": 100}
+        for _ in range(10):
+            params = {"userId": "me", "q": 'in:inbox {subject:"[AGENTRELAY]" subject:"AGENTRELAY/1"}', "maxResults": 100}
             if token:
                 params["pageToken"] = token
-            response = self.service.users().messages().list(**params).execute()
+            response = self.service.users().messages().list(**params).execute(num_retries=0)
             ids.extend(item["id"] for item in response.get("messages", []) if item.get("id"))
             token = response.get("nextPageToken")
             if not token:
@@ -59,7 +65,7 @@ class GoogleGmailGateway:
         return ids
 
     def fetch_message(self, message_id: str) -> GmailMessage:
-        raw = self.service.users().messages().get(userId="me", id=message_id, format="full").execute()
+        raw = self.service.users().messages().get(userId="me", id=message_id, format="full").execute(num_retries=0)
         payload = raw.get("payload", {})
         body_chunks: list[str] = []
         attachments: list[Attachment] = []
@@ -70,6 +76,6 @@ class GoogleGmailGateway:
             if data and mime.startswith("text/"):
                 body_chunks.append(base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="replace"))
             if part.get("filename") and body.get("attachmentId"):
-                encoded = self.service.users().messages().attachments().get(userId="me", messageId=message_id, id=body["attachmentId"]).execute()["data"]
+                encoded = self.service.users().messages().attachments().get(userId="me", messageId=message_id, id=body["attachmentId"]).execute(num_retries=0)["data"]
                 attachments.append(Attachment(part["filename"], base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))))
         return GmailMessage(message_id, raw.get("threadId"), raw.get("internalDate"), "\n".join(body_chunks), tuple(attachments))
