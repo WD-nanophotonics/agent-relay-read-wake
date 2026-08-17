@@ -110,6 +110,7 @@ def write_evidence(
     navigation_attempts: int = 1,
     verification_attempts: int = 1,
     submission_verified: bool = True,
+    watchdog_startup_verified: bool | None = None,
 ) -> Path:
     if chat_url != EXPECTED_CHAT_URL:
         raise ValueError("handoff URL does not match the fixed ChatGPT target")
@@ -128,8 +129,21 @@ def write_evidence(
         "navigation_attempts": navigation_attempts,
         "verification_attempts": verification_attempts,
         "submission_verified": True,
+        "watchdog_startup_verified": watchdog_startup_verified,
         "recorded_at": now(),
     })
+    return target
+
+
+def update_watchdog_startup_evidence(project_storage: Path, lease_id: str, verified: bool, detail: str = "") -> Path:
+    target = evidence_path(project_storage, lease_id)
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("handoff evidence is missing or malformed") from exc
+    value["watchdog_startup_verified"] = bool(verified)
+    value["watchdog_startup_detail"] = detail
+    atomic_json(target, value)
     return target
 
 

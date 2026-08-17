@@ -21,9 +21,12 @@ agent-relay init
 agent-relay poll-once
 agent-relay status
 agent-relay stop
+agent-relay watchdog-ui
 ```
 
 `test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。Worker 使用配置的 Codex 命令执行单个暂存任务，生成 `AGENTRELAY_CHATGPT_HANDOFF/1` 后通过 `handoff_command` 调用一次性固定 URL sender；sender 必须在 stdout 给出 `SUBMITTED`，否则不写成功证据、不启动 watchdog。成功后才写本地审计副本并启动一次 detached watchdog。Watchdog 用 `project + RUN + AFTER_STEP` 精确锁去重，最多等待/调用两次 `poll-once`，绝不打断活动 Worker、递归唤醒或常驻运行。
+
+`watchdog-ui` 是只读 Tkinter 监视器：它读取 `watchdogs/<RUN>-after-<STEP>.json`、状态快照和 JSONL 账本，显示启动确认、存活 PID、当前尝试、下一次 poll 倒计时、最近结果和终止原因。它不读取 Gmail、不启动 Worker，也不影响 watchdog；关闭窗口不会停止后台 watchdog。没有记录时会显示 `NO ACTIVE WATCHDOG`。
 
 ## 安全边界
 

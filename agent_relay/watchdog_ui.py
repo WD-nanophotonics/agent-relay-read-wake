@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from datetime import datetime
+import os
+from pathlib import Path
+import subprocess
+
+from .ownership import exact_owner_live
+from .storage import StateStore
+from .watchdog import load_watchdog_status
+
+
+class WatchdogMonitorModel:
+    """Read-only view model; it never polls Gmail or changes relay state."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def snapshot(self) -> dict:
+        watchdog = load_watchdog_status(self.config.local_project_storage)
+        state = StateStore(self.config.local_project_storage).load()
+        if watchdog:
+            watchdog = dict(watchdog)
+            watchdog["alive"] = bool(watchdog.get("pid") and exact_owner_live(watchdog))
+            next_poll = watchdog.get("next_poll_at")
+            if next_poll:
+                try:
+                    target = datetime.fromisoformat(next_poll)
+                    watchdog["countdown_seconds"] = max(0, int((target - datetime.now(target.tzinfo)).total_seconds()))
+                except (TypeError, ValueError):
+                    watchdog["countdown_seconds"] = None
+        return {"watchdog": watchdog, "relay": state}
+
+
+def _open_path(path: Path) -> None:
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(str(path))
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except OSError:
+        pass
+
+
+def run_watchdog_ui(config) -> int:
+    import tkinter as tk
+    from tkinter import ttk
+
+    model = WatchdogMonitorModel(config)
+    root = tk.Tk()
+    root.title("AgentRelay Watchdog")
+    root.geometry("620x430")
+    fields = [
+        ("Status", "status"), ("RUN", "run_id"), ("After STEP", "after_step"),
+        ("PID / alive-dead", "pid_alive"), ("Started at", "started_at"),
+        ("Attempt", "attempt"), ("Next poll time", "next_poll_at"),
+        ("Countdown / seconds remaining", "countdown_seconds"), ("Relay mode", "relay_mode"),
+        ("Expected STEP", "expected_step"), ("Active/pending Worker", "worker"),
+        ("Last poll time", "last_poll_at"), ("Last poll result", "last_poll_action"),
+        ("Last error", "last_error"), ("Finished reason", "finish_reason"),
+    ]
+    values: dict[str, ttk.Label] = {}
+    frame = ttk.Frame(root, padding=12)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text="AgentRelay Watchdog", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    for row, (label, key) in enumerate(fields, 1):
+        ttk.Label(frame, text=label + ":").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=2)
+        value = ttk.Label(frame, text="-")
+        value.grid(row=row, column=1, sticky="nw", pady=2)
+        values[key] = value
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
+    ttk.Button(buttons, text="Refresh", command=lambda: refresh()).pack(side="left", padx=(0, 6))
+    ttk.Button(buttons, text="Open log", command=lambda: _open_path(config.local_project_storage / "ledger" / "events.jsonl")).pack(side="left", padx=(0, 6))
+    ttk.Button(buttons, text="Open runtime folder", command=lambda: _open_path(config.local_project_storage)).pack(side="left")
+
+    def refresh() -> None:
+        snap = model.snapshot()
+        watchdog = snap["watchdog"]
+        relay = snap["relay"]
+        if not watchdog:
+            values["status"].configure(text="NO ACTIVE WATCHDOG")
+            for key in values:
+                if key != "status":
+                    values[key].configure(text="-")
+        else:
+            values["status"].configure(text=watchdog.get("status", "-"))
+            values["run_id"].configure(text=watchdog.get("run_id", "-"))
+            values["after_step"].configure(text=f"{int(watchdog.get('after_step', 0)):04d}")
+            values["pid_alive"].configure(text=f"{watchdog.get('pid', '-')} / {'alive' if watchdog.get('alive') else 'dead'}")
+            for key in ("started_at", "attempt", "next_poll_at", "countdown_seconds", "last_poll_at", "last_poll_action", "last_error", "finish_reason"):
+                values[key].configure(text=str(watchdog.get(key) if watchdog.get(key) is not None else "-"))
+        values["relay_mode"].configure(text=relay.get("mode", "-"))
+        values["expected_step"].configure(text=str(relay.get("expected_step", "-")))
+        values["worker"].configure(text=str(relay.get("active_worker") or relay.get("pending_worker") or "-"))
+        root.after(1000, refresh)
+
+    refresh()
+    root.mainloop()
+    return 0

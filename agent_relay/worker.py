@@ -9,7 +9,7 @@ import time
 from typing import Callable
 from uuid import uuid4
 
-from .handoff import build_actionable_report, CommandHandoffSender, write_evidence
+from .handoff import build_actionable_report, CommandHandoffSender, update_watchdog_startup_evidence, write_evidence
 from .ownership import exact_owner_live
 from .storage import Ledger, StateStore, now
 
@@ -23,7 +23,7 @@ class WorkerOutcome:
 class OneShotWorker:
     """Own exactly one staged task and terminate after one bounded execution."""
 
-    def __init__(self, config, *, executor: Callable[[str, Path], WorkerOutcome] | None = None, handoff_sender=None, watchdog_spawn: Callable[[int, str], None] | None = None):
+    def __init__(self, config, *, executor: Callable[[str, Path], WorkerOutcome] | None = None, handoff_sender=None, watchdog_spawn: Callable[[int, str], object] | None = None):
         self.config = config
         self.store = StateStore(config.local_project_storage)
         self.ledger = Ledger(config.local_project_storage)
@@ -79,7 +79,15 @@ class OneShotWorker:
             self._write_handoff(run_id, step, owner, outcome.detail, baseline_sha=baseline_sha)
             self.ledger.append("worker_completed", worker_id=owner["worker_id"], step=step)
             if self.watchdog_spawn:
-                self.watchdog_spawn(step, run_id)
+                try:
+                    launch = self.watchdog_spawn(step, run_id)
+                    verified = bool(launch.get("started")) if isinstance(launch, dict) else launch is not False
+                    detail = str(launch.get("detail", "")) if isinstance(launch, dict) else ""
+                except Exception as exc:
+                    verified = False
+                    detail = f"{type(exc).__name__}: {exc}"
+                update_watchdog_startup_evidence(self.config.local_project_storage, owner["worker_id"], verified, detail)
+                self.ledger.append("watchdog_start_confirmed" if verified else "watchdog_start_failed", worker_id=owner["worker_id"], step=step, detail=detail)
             return outcome
         except Exception as exc:
             outcome = WorkerOutcome(False, f"{type(exc).__name__}: {exc}")
@@ -125,7 +133,7 @@ class OneShotWorker:
         target = self.config.local_project_storage / "handoffs" / f"{owner['worker_id']}.txt"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(report, encoding="utf-8")
-        write_evidence(self.config.local_project_storage, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], chat_url=self.config.chat_url, send_attempts=submission.attempts, submission_verified=True)
+        write_evidence(self.config.local_project_storage, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], chat_url=self.config.chat_url, send_attempts=submission.attempts, submission_verified=True, watchdog_startup_verified=None)
         return target
 
 

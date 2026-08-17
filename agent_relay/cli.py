@@ -14,7 +14,7 @@ from .worker import OneShotWorker, ProcessWorkerLauncher
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "poll-once", "worker", "watchdog", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
+    parser.add_argument("command", choices=("init", "poll-once", "worker", "watchdog", "watchdog-ui", "monitor", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
     parser.add_argument("--run")
     parser.add_argument("--step", type=int)
     parser.add_argument("--after-step", type=int)
@@ -22,6 +22,7 @@ def main(argv=None) -> int:
     parser.add_argument("--worker-id")
     parser.add_argument("--message-id")
     parser.add_argument("--content-hash")
+    parser.add_argument("--watchdog-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
     args = parser.parse_args(argv)
@@ -74,15 +75,18 @@ def main(argv=None) -> int:
     if args.command == "watchdog":
         if not args.run or args.after_step is None:
             parser.error("watchdog requires --run and --after-step")
-        result = run_watchdog(config, run_id=args.run, after_step=args.after_step, poll_factory=lambda: Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()))
+        result = run_watchdog(config, run_id=args.run, after_step=args.after_step, watchdog_id=args.watchdog_id, poll_factory=lambda: Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()))
         print(f"WATCHDOG_{result.upper()}")
         return 0
+    if args.command in {"watchdog-ui", "monitor"}:
+        from .watchdog_ui import run_watchdog_ui
+        return run_watchdog_ui(config)
     return 0
 
 
-def _spawn_watchdog(config, run_id: str, after_step: int) -> None:
+def _spawn_watchdog(config, run_id: str, after_step: int) -> dict:
     from .watchdog import spawn_watchdog
-    spawn_watchdog(config, run_id=run_id, after_step=after_step)
+    return spawn_watchdog(config, run_id=run_id, after_step=after_step)
 
 
 if __name__ == "__main__":
