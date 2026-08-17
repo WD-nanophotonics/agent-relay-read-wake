@@ -37,7 +37,7 @@ def run() -> None:
         def sleep_once(_seconds):
             observed.append(load_watchdog_status(root, run_id, 16))
 
-        result = run_watchdog(cfg, run_id=run_id, after_step=16, watchdog_id="wd-success", poll_factory=lambda: SimpleNamespace(poll_once=lambda: PollResult("launched")), sleep=sleep_once)
+        result = run_watchdog(cfg, run_id=run_id, after_step=16, watchdog_id="wd-success", poll_factory=lambda: SimpleNamespace(poll_once=lambda: PollResult("launched")), sleep=sleep_once, ui_spawn=lambda: None)
         status = load_watchdog_status(root, run_id, 16)
         assert result == "launched" and status["status"] == "WORKER_STARTED"
         assert observed[0]["status"] == "WAITING" and observed[0]["next_poll_at"]
@@ -52,21 +52,21 @@ def run() -> None:
         root2 = Path(tempfile.mkdtemp(prefix="agentrelay-watchdog-miss-"))
         cfg2 = config(root2)
         attempts = []
-        result2 = run_watchdog(cfg2, run_id=run_id, after_step=17, watchdog_id="wd-miss", poll_factory=lambda: SimpleNamespace(poll_once=lambda: (attempts.append(1) or PollResult("idle"))), sleep=lambda _seconds: None)
+        result2 = run_watchdog(cfg2, run_id=run_id, after_step=17, watchdog_id="wd-miss", poll_factory=lambda: SimpleNamespace(poll_once=lambda: (attempts.append(1) or PollResult("idle"))), sleep=lambda _seconds: None, ui_spawn=lambda: None)
         status2 = load_watchdog_status(root2, run_id, 17)
         assert result2 == "exhausted" and status2["status"] == "EXHAUSTED" and len(attempts) == MAX_ATTEMPTS
 
         root3 = Path(tempfile.mkdtemp(prefix="agentrelay-watchdog-stop-"))
         cfg3 = config(root3)
         stopped = StateStore(root3).load(); stopped["stop_requested"] = True; StateStore(root3).save(stopped)
-        assert run_watchdog(cfg3, run_id=run_id, after_step=18, watchdog_id="wd-stop", poll_factory=lambda: None, sleep=lambda _seconds: None) == "stopped"
+        assert run_watchdog(cfg3, run_id=run_id, after_step=18, watchdog_id="wd-stop", poll_factory=lambda: None, sleep=lambda _seconds: None, ui_spawn=lambda: None) == "stopped"
         assert load_watchdog_status(root3, run_id, 18)["status"] == "STOPPED"
 
         root4 = Path(tempfile.mkdtemp(prefix="agentrelay-watchdog-fail-"))
         cfg4 = config(root4)
         def exploding():
             raise RuntimeError("synthetic poll failure")
-        assert run_watchdog(cfg4, run_id=run_id, after_step=19, watchdog_id="wd-fail", poll_factory=lambda: SimpleNamespace(poll_once=exploding), sleep=lambda _seconds: None) == "exception"
+        assert run_watchdog(cfg4, run_id=run_id, after_step=19, watchdog_id="wd-fail", poll_factory=lambda: SimpleNamespace(poll_once=exploding), sleep=lambda _seconds: None, ui_spawn=lambda: None) == "exception"
         assert load_watchdog_status(root4, run_id, 19)["status"] == "FAILED"
 
         root5 = Path(tempfile.mkdtemp(prefix="agentrelay-watchdog-ui-"))

@@ -34,6 +34,7 @@ def _status_template(*, watchdog_id: str, pid: int | None, exe: str, run_id: str
         "wait_started_at": None, "next_poll_at": None, "last_poll_at": None,
         "last_poll_action": None, "last_error": None, "finished_at": None,
         "finish_reason": None, "startup_ack_at": None,
+        "ui_pid": None, "ui_started_at": None, "ui_error": None,
     }
 
 
@@ -95,6 +96,13 @@ def _append(ledger: Ledger, event: str, *, run_id: str, after_step: int, watchdo
     ledger.append(event, run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, attempt=attempt, **values)
 
 
+def spawn_watchdog_ui(config) -> int:
+    """Launch the read-only Tk monitor without making it the foreground window."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen([sys.executable, "-m", "agent_relay.cli", "watchdog-ui"], cwd=config.repo_path, creationflags=flags, close_fds=True)
+    return process.pid
+
+
 def spawn_watchdog(config, *, run_id: str, after_step: int) -> dict[str, Any]:
     """Spawn one detached watchdog and wait briefly for its startup ACK."""
     root = config.local_project_storage
@@ -146,7 +154,7 @@ def _finish(status: dict[str, Any], root: Path, run_id: str, after_step: int, le
     return return_value or reason
 
 
-def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=time.sleep, watchdog_id: str | None = None) -> str:
+def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=time.sleep, watchdog_id: str | None = None, ui_spawn=None) -> str:
     root = config.local_project_storage
     ledger = Ledger(root)
     watchdog_id = watchdog_id or str(uuid4())
@@ -161,6 +169,15 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=ti
         status.update({"watchdog_id": watchdog_id, "pid": pid, "exe": Path(sys.executable).name, "status": "STARTING", "startup_ack_at": now()})
         _save_status(root, run_id, after_step, status)
         _append(ledger, "watchdog_started", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid)
+        try:
+            ui_pid = (ui_spawn or (lambda: spawn_watchdog_ui(config)))()
+            status.update({"ui_pid": ui_pid, "ui_started_at": now()})
+            _save_status(root, run_id, after_step, status)
+            _append(ledger, "watchdog_ui_process_created", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, ui_pid=ui_pid)
+        except Exception as exc:
+            status["ui_error"] = f"{type(exc).__name__}: {exc}"
+            _save_status(root, run_id, after_step, status)
+            _append(ledger, "watchdog_ui_failed", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, error=status["ui_error"])
         for attempt in range(1, MAX_ATTEMPTS + 1):
             status.update({"status": "WAITING", "attempt": attempt, "wait_started_at": now(), "next_poll_at": datetime.fromtimestamp(time.time() + WAIT_SECONDS, UTC).isoformat(), "last_error": None})
             _save_status(root, run_id, after_step, status)

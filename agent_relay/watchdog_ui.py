@@ -48,11 +48,15 @@ def run_watchdog_ui(config) -> int:
 
     model = WatchdogMonitorModel(config)
     root = tk.Tk()
+    # Build hidden, then show without activation so the monitor has a taskbar
+    # window but never jumps in front of the user's current application.
+    root.withdraw()
     root.title("AgentRelay Watchdog")
     root.geometry("620x430")
     fields = [
         ("Status", "status"), ("RUN", "run_id"), ("After STEP", "after_step"),
         ("PID / alive-dead", "pid_alive"), ("Started at", "started_at"),
+        ("UI PID", "ui_pid"),
         ("Attempt", "attempt"), ("Next poll time", "next_poll_at"),
         ("Countdown / seconds remaining", "countdown_seconds"), ("Relay mode", "relay_mode"),
         ("Expected STEP", "expected_step"), ("Active/pending Worker", "worker"),
@@ -88,7 +92,7 @@ def run_watchdog_ui(config) -> int:
             values["run_id"].configure(text=watchdog.get("run_id", "-"))
             values["after_step"].configure(text=f"{int(watchdog.get('after_step', 0)):04d}")
             values["pid_alive"].configure(text=f"{watchdog.get('pid', '-')} / {'alive' if watchdog.get('alive') else 'dead'}")
-            for key in ("started_at", "attempt", "next_poll_at", "countdown_seconds", "last_poll_at", "last_poll_action", "last_error", "finish_reason"):
+            for key in ("started_at", "ui_pid", "attempt", "next_poll_at", "countdown_seconds", "last_poll_at", "last_poll_action", "last_error", "finish_reason"):
                 values[key].configure(text=str(watchdog.get(key) if watchdog.get(key) is not None else "-"))
         values["relay_mode"].configure(text=relay.get("mode", "-"))
         values["expected_step"].configure(text=str(relay.get("expected_step", "-")))
@@ -96,5 +100,15 @@ def run_watchdog_ui(config) -> int:
         root.after(1000, refresh)
 
     refresh()
+    def show_without_activation() -> None:
+        root.deiconify()
+        root.attributes("-topmost", False)
+        if os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.user32.ShowWindow(root.winfo_id(), 4)  # SW_SHOWNOACTIVATE
+            except (AttributeError, OSError):
+                pass
+    root.after_idle(show_without_activation)
     root.mainloop()
     return 0

@@ -22,6 +22,7 @@ class BrowserChatGPTSender:
         self.debug_port = int(os.environ.get("AGENT_RELAY_CHATGPT_DEBUG_PORT", "9333"))
         self.chrome_path = os.environ.get("AGENT_RELAY_CHROME", "") or self._find_chrome()
         self.timeout = 120
+        self.post_submit_delay = 10
         self.owned_process: subprocess.Popen | None = None
 
     @staticmethod
@@ -105,6 +106,9 @@ class BrowserChatGPTSender:
                     # The submitted user turn is visible in the real conversation;
                     # this is deliberately stronger than a local stdout marker.
                     if marker in page.locator("main").inner_text(timeout=3000):
+                        # Leave the submitted turn visible long enough for the
+                        # user-facing browser window and remote UI to settle.
+                        time.sleep(self.post_submit_delay)
                         return HandoffSubmission(True, "real ChatGPT conversation contains submitted handoff", verified=True)
                     page.wait_for_timeout(500)
                 raise RuntimeError("fixed ChatGPT conversation did not visibly receive handoff")
