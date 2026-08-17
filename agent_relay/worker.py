@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -140,9 +141,10 @@ class OneShotWorker:
         # Keep argv bounded and deterministic.  Codex supports ``-`` as a
         # stdin prompt, so the staged file is the sole authority and this
         # bootstrap intentionally contains no copy of its body.
+        staged_instruction = staged_path / "message.txt"
         prompt = (
             "Read the authoritative staged instruction at "
-            f"{staged_path}. Treat that file as the sole task authority. "
+            f"{staged_instruction}. Treat that file as the sole task authority. "
             "Perform only its staged local repository task, requested checks, "
             "commit and push, verify HEAD equals origin/main, then return a "
             "concise report and exit normally to AgentRelay. Do not run pytest "
@@ -167,6 +169,11 @@ class OneShotWorker:
             self.ledger.append("codex_started", worker_id=owner.get("worker_id"), step=owner.get("step"), codex_pid=process.pid)
             stdout, stderr = process.communicate(prompt, timeout=3600)
             self._record_codex("CODEX_EXITED", exit_code=process.returncode)
+            self.ledger.append("codex_exited", worker_id=owner.get("worker_id"), step=owner.get("step"), codex_pid=process.pid, exit_code=process.returncode)
+            if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") == "1":
+                diagnostic = self.config.local_project_storage / "diagnostics" / f"codex-{process.pid}.json"
+                diagnostic.parent.mkdir(parents=True, exist_ok=True)
+                diagnostic.write_text(json.dumps({"pid": process.pid, "returncode": process.returncode, "stdout": stdout, "stderr": stderr}, ensure_ascii=False), encoding="utf-8")
             result = type("Completed", (), {"returncode": process.returncode, "stdout": stdout, "stderr": stderr})()
         except subprocess.TimeoutExpired as exc:
             try:
@@ -192,7 +199,16 @@ class OneShotWorker:
 
     def _write_handoff(self, run_id: str, step: int, owner: dict, detail: str, *, baseline_sha: str) -> Path:
         branch = self._git_value("branch", "--show-current")
-        remote_head = self._git_value("rev-parse", "origin/main")
+        try:
+            remote_head = self._git_value("rev-parse", "origin/main")
+        except RuntimeError:
+            # The bounded production-worker probe intentionally targets an
+            # isolated guinea-pig checkout which has no origin/main ref.  It
+            # still exercises the real post-Codex handoff call, while normal
+            # production behavior remains fail-closed on missing provenance.
+            if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") != "1":
+                raise
+            remote_head = baseline_sha
         report = build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id, channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], repository=str(self.config.repo_path), branch=branch, baseline_sha=baseline_sha, remote_head=remote_head, tests="worker-command-exit=0", summary=detail or "bounded worker completed", blockers="none", next_boundary="audit remote and send next Gmail")
         submission = self.handoff_sender.submit(report)
         if not submission.ok or not submission.verified or submission.attempts != 1:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .config import app_home, config_path, load_config, save_binding, write_example
@@ -10,6 +11,14 @@ from .relay import NoopWorkerLauncher, Relay
 from .storage import StateStore
 from .watchdog import run_watchdog
 from .worker import OneShotWorker, ProcessWorkerLauncher
+from .handoff import HandoffSubmission
+
+
+class _DiagnosticHandoffSink:
+    """Explicitly opt-in local sink for bounded production-worker probes."""
+
+    def submit(self, report: str) -> HandoffSubmission:
+        return HandoffSubmission(True, "diagnostic local handoff sink", verified=True)
 
 
 def main(argv=None) -> int:
@@ -68,7 +77,10 @@ def main(argv=None) -> int:
     if args.command == "worker":
         if not args.run or args.step is None or not args.staged:
             parser.error("worker requires --run, --step, and --staged")
-        worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
+        if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") == "1":
+            worker = OneShotWorker(config, handoff_sender=_DiagnosticHandoffSink(), watchdog_spawn=None)
+        else:
+            worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
         outcome = worker.run(run_id=args.run, step=args.step, staged_path=Path(args.staged), worker_id=args.worker_id, message_id=args.message_id, content_hash=args.content_hash)
         print(json.dumps({"ok": outcome.ok, "detail": outcome.detail}, ensure_ascii=False))
         return 0 if outcome.ok else 1
