@@ -43,8 +43,20 @@ class GoogleGmailGateway:
 
     def list_messages(self) -> list[str]:
         # Deliberately broad: protocol validation, not Gmail search syntax, controls routing.
-        response = self.service.users().messages().list(userId="me", q="in:inbox", maxResults=100).execute()
-        return [item["id"] for item in response.get("messages", [])]
+        ids: list[str] = []
+        token = None
+        # A poll is still one fetch cycle; pagination only prevents a valid
+        # authoritative WAKE from being hidden behind unrelated Inbox mail.
+        for _ in range(20):
+            params = {"userId": "me", "q": "in:inbox", "maxResults": 100}
+            if token:
+                params["pageToken"] = token
+            response = self.service.users().messages().list(**params).execute()
+            ids.extend(item["id"] for item in response.get("messages", []) if item.get("id"))
+            token = response.get("nextPageToken")
+            if not token:
+                break
+        return ids
 
     def fetch_message(self, message_id: str) -> GmailMessage:
         raw = self.service.users().messages().get(userId="me", id=message_id, format="full").execute()
