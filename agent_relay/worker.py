@@ -99,7 +99,10 @@ class OneShotWorker:
         command = getattr(self.config, "codex_command", "codex.cmd")
         prompt = instruction + "\n\nBounded worker contract: complete this task, run the requested checks, commit and push, verify HEAD equals origin/main, then return a concise report. Do not wait for Gmail or ChatGPT."
         try:
-            result = subprocess.run([command, "exec", "--sandbox", "workspace-write", "--approve-for-me", prompt], cwd=repo_path, text=True, capture_output=True, timeout=3600, check=False)
+            # Codex exposes these as mutually-exclusive approval modes.  Use the
+            # bounded non-interactive approval flag alone; it grants the worker's
+            # workspace scope without producing an invalid invocation.
+            result = subprocess.run([command, "exec", "--approve-for-me", prompt], cwd=repo_path, text=True, capture_output=True, timeout=3600, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return WorkerOutcome(False, type(exc).__name__)
         detail = (result.stdout or result.stderr or "").strip()[-4000:]
