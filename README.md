@@ -37,6 +37,11 @@ agent-relay watchdog-ui
 
 `agent_relay.local_controller` is a separate certification-only local loop. Its Controller A owns a durable finite objective and examines Worker B's file result before making exactly one of `CONTINUE`, `COMPLETE`, or `HUMAN_REQUIRED`; B only executes a bounded file-backed task. It neither reads Gmail nor starts a watchdog or browser bridge. Each A→B and B→A handoff is held until the successor's exact ACK, claim (for B), and liveness record are durable.
 
+Both real roles are launched with explicit `gpt-5.6-luna` and
+`model_reasoning_effort=high` CLI arguments. The local loop records those
+arguments in its durable event and metadata files; workstation Codex defaults
+are never treated as model-selection evidence.
+
 ## 验证
 
 ```powershell

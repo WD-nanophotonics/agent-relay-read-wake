@@ -1,9 +1,9 @@
-"""Bounded, file-only local Controller (A) / Worker (B) certification loop.
+"""Durable transport for a real local Codex Controller (A) and Worker (B).
 
-This is intentionally separate from the Gmail, watchdog, and ChatGPT paths.
-The controller has a durable objective with a finite checklist and can decide
-only CONTINUE, COMPLETE, or HUMAN_REQUIRED.  Process arguments carry only
-identity and location data; task and result bodies always live in files.
+Python owns only the handoff protocol: claims, hashes, exact ACK/liveness and
+the three allowed controller enums.  Codex owns both the next-task decision and
+the bounded repository work; neither task nor result bodies are command-line
+arguments.
 """
 from __future__ import annotations
 
@@ -19,9 +19,14 @@ from uuid import uuid4
 
 from .storage import atomic_json, now
 
-
-ACK_TIMEOUT = 20.0
-FACTS = ("cwd", "branch", "head", "clean", "pyproject", "top_level", "git_dir", "readme", "package", "python_files")
+ACK_TIMEOUT = 30.0
+CODEX_TIMEOUT = 600.0
+DECISIONS = {"CONTINUE", "COMPLETE", "HUMAN_REQUIRED"}
+# STEP-0009's amendment requires that both real roles select Luna High
+# explicitly.  Keep this immutable in the production launch path: a machine
+# default (currently Terra on this workstation) is not acceptable evidence.
+LUNA_MODEL = "gpt-5.6-luna"
+LUNA_REASONING_EFFORT = "high"
 
 
 def _read(path: Path) -> dict:
@@ -33,14 +38,12 @@ def _hash(data: bytes) -> str:
 
 
 def _event(root: Path, event: str, **fields: object) -> None:
-    path = root / "events.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as output:
+    with (root / "events.jsonl").open("a", encoding="utf-8") as output:
         output.write(json.dumps({"at": now(), "event": event, **fields}, sort_keys=True) + "\n")
 
 
 def _paths(root: Path) -> None:
-    for name in ("acks", "verified", "live", "release", "owners", "tasks", "results", "claims", "terminal"):
+    for name in ("acks", "verified", "live", "release", "owners", "tasks", "results", "claims", "terminal", "agent_instructions", "agent_logs"):
         (root / name).mkdir(parents=True, exist_ok=True)
 
 
@@ -49,8 +52,9 @@ def _handoff_id(role: str, turn: int) -> str:
 
 
 def _ack(root: Path, role: str, handoff: str, turn: int) -> None:
-    atomic_json(root / "acks" / f"{handoff}.{role}.json", {"role": role, "handoff": handoff, "turn": turn, "pid": os.getpid(), "at": now()})
-    atomic_json(root / "owners" / f"{handoff}.{role}.json", {"role": role, "handoff": handoff, "turn": turn, "pid": os.getpid(), "state": "STARTED", "at": now()})
+    value = {"role": role, "handoff": handoff, "turn": turn, "pid": os.getpid(), "at": now()}
+    atomic_json(root / "acks" / f"{handoff}.{role}.json", value)
+    atomic_json(root / "owners" / f"{handoff}.{role}.json", {**value, "state": "STARTED"})
     _event(root, "startup_ack", role=role, handoff=handoff, turn=turn, pid=os.getpid())
 
 
@@ -63,8 +67,7 @@ def _spawn(root: Path, role: str, turn: int, handoff: str) -> subprocess.Popen:
 
 
 def _wait_successor(root: Path, role: str, handoff: str, turn: int, pid: int) -> None:
-    ack = root / "acks" / f"{handoff}.{role}.json"
-    deadline = time.monotonic() + ACK_TIMEOUT
+    ack = root / "acks" / f"{handoff}.{role}.json"; deadline = time.monotonic() + ACK_TIMEOUT
     while time.monotonic() < deadline:
         if ack.exists():
             value = _read(ack)
@@ -74,8 +77,7 @@ def _wait_successor(root: Path, role: str, handoff: str, turn: int, pid: int) ->
                     if not claim.exists() or _read(claim).get("pid") != pid:
                         time.sleep(.02); continue
                 atomic_json(root / "verified" / f"{handoff}.{role}.json", value)
-                live = root / "live" / f"{handoff}.{role}.json"
-                until = time.monotonic() + ACK_TIMEOUT
+                live = root / "live" / f"{handoff}.{role}.json"; until = time.monotonic() + ACK_TIMEOUT
                 while time.monotonic() < until:
                     if live.exists() and _read(live).get("pid") == pid:
                         atomic_json(root / "release" / f"{handoff}.{role}.json", {"pid": pid, "at": now()})
@@ -87,150 +89,138 @@ def _wait_successor(root: Path, role: str, handoff: str, turn: int, pid: int) ->
 
 
 def _await_release(root: Path, role: str, handoff: str, turn: int) -> None:
-    verified = root / "verified" / f"{handoff}.{role}.json"
-    deadline = time.monotonic() + ACK_TIMEOUT
+    verified = root / "verified" / f"{handoff}.{role}.json"; deadline = time.monotonic() + ACK_TIMEOUT
     while time.monotonic() < deadline:
         if verified.exists() and _read(verified).get("pid") == os.getpid():
             atomic_json(root / "live" / f"{handoff}.{role}.json", {"pid": os.getpid(), "role": role, "handoff": handoff, "turn": turn, "at": now()})
             release = root / "release" / f"{handoff}.{role}.json"
             while time.monotonic() < deadline:
-                if release.exists() and _read(release).get("pid") == os.getpid():
-                    return
+                if release.exists() and _read(release).get("pid") == os.getpid(): return
                 time.sleep(.02)
         time.sleep(.02)
     raise RuntimeError("parent did not verify startup ACK")
 
 
-def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()
+def _codex(root: Path, role: str, instruction: Path, repository: Path) -> None:
+    """Run a real Codex role; its only prompt is a file-location bootstrap."""
+    prompt = f"You are local {role}. Read the durable instruction file at {instruction}. It is your sole authority. Follow it exactly, write only the requested durable output file, and exit."
+    command = [
+        os.environ.get("AGENT_RELAY_CODEX_COMMAND", "codex.cmd"),
+        "exec", "--model", LUNA_MODEL,
+        "-c", f"model_reasoning_effort={LUNA_REASONING_EFFORT}",
+        "--approve-for-me", "-",
+    ]
+    instruction_id = instruction.stem
+    atomic_json(root / "agent_logs" / f"{role}-{instruction_id}.meta.json", {
+        "role": role,
+        "model": LUNA_MODEL,
+        "reasoning_effort": LUNA_REASONING_EFFORT,
+        "command": command,
+        "repository": str(repository),
+        "instruction": instruction.name,
+        "model_selection": "explicit-cli-arguments",
+        "at": now(),
+    })
+    _event(root, "codex_starting", role=role, model=LUNA_MODEL,
+           reasoning_effort=LUNA_REASONING_EFFORT, model_selection="explicit-cli-arguments",
+           command=command, instruction=instruction.name)
+    try:
+        result = subprocess.run(command, input=prompt, text=True, cwd=repository, capture_output=True, timeout=CODEX_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"real {role} Codex launch failed: {type(exc).__name__}") from exc
+    (root / "agent_logs" / f"{role}-{instruction.stem}.log").write_text((result.stdout or "") + "\n" + (result.stderr or ""), encoding="utf-8")
+    _event(root, "real_codex_exited", role=role, instruction=instruction.name,
+           exit_code=result.returncode, model=LUNA_MODEL,
+           reasoning_effort=LUNA_REASONING_EFFORT)
+    if result.returncode:
+        raise RuntimeError(f"real {role} Codex exited {result.returncode}")
 
 
-def _inspect(repo: Path, fact: str) -> str:
-    if fact == "cwd": return str(repo.resolve())
-    if fact == "branch": return _git(repo, "branch", "--show-current")
-    if fact == "head": return _git(repo, "rev-parse", "HEAD")
-    if fact == "clean": return "clean" if not _git(repo, "status", "--short") else "dirty"
-    if fact == "pyproject": return str((repo / "pyproject.toml").is_file())
-    if fact == "top_level": return ",".join(sorted(item.name for item in repo.iterdir())[:8])
-    if fact == "git_dir": return str((repo / ".git").exists())
-    if fact == "readme": return str((repo / "README.md").is_file())
-    if fact == "package": return str((repo / "agent_relay" / "__init__.py").is_file())
-    if fact == "python_files": return str(len(list((repo / "agent_relay").glob("*.py"))) > 0)
-    raise ValueError("unknown bounded fact")
+def _controller_instruction(root: Path, run: dict, turn: int, output: Path) -> Path:
+    previous = root / "results" / f"{turn:04d}.json"
+    text = {
+        "role": "Controller Agent A", "objective_file": str(root / "run.json"),
+        "previous_worker_result_file": str(previous) if previous.exists() else None,
+        "output_file": str(output), "allowed_decisions": sorted(DECISIONS),
+        "requirements": ["Read the durable objective and previous result.", "Independently decide one allowed decision.", "For CONTINUE, author one useful, bounded, read-only repository task for the Worker, including a concise task_body and optional failure_injection boolean.", "For COMPLETE or HUMAN_REQUIRED, provide a concise reason.", "Do not modify the repository."],
+        "output_schema": {"decision": "CONTINUE|COMPLETE|HUMAN_REQUIRED", "reason": "string", "task_body": "string required for CONTINUE", "failure_injection": "boolean optional"},
+    }
+    path = root / "agent_instructions" / f"controller-{turn:04d}.json"; atomic_json(path, text); return path
 
 
-def _write_task(root: Path, run: dict, turn: int, fact: str, inject_failure: bool = False) -> None:
-    directory = root / "tasks" / f"{turn:04d}"
-    payload = json.dumps({"run_id": run["run_id"], "turn": turn, "fact": fact, "repository": run["repository"], "inject_failure": inject_failure}, sort_keys=True).encode("utf-8")
-    directory.mkdir(parents=True, exist_ok=False)
+def _worker_instruction(root: Path, turn: int, task: Path, output: Path) -> Path:
+    text = {"role": "Worker Agent B", "task_file": str(task / "task.json"), "output_file": str(output),
+            "requirements": ["Read only the durable task file for task authority.", "Perform its bounded read-only repository inspection.", "Do not modify, commit, push, or run tests.", "If failure_injection is true, return status FAILED with a concise failure field instead of doing work."],
+            "output_schema": {"status": "OK|FAILED", "summary": "string", "evidence": "object optional", "failure": "string required when FAILED"}}
+    path = root / "agent_instructions" / f"worker-{turn:04d}.json"; atomic_json(path, text); return path
+
+
+def _write_task(root: Path, run: dict, turn: int, decision: dict) -> None:
+    directory = root / "tasks" / f"{turn:04d}"; directory.mkdir(parents=True, exist_ok=False)
+    body = str(decision["task_body"]).encode("utf-8")
+    payload = json.dumps({"run_id": run["run_id"], "turn": turn, "repository": run["repository"], "task_body": body.decode("utf-8"), "failure_injection": bool(decision.get("failure_injection", False))}, sort_keys=True).encode("utf-8")
     (directory / "task.json").write_bytes(payload)
-    atomic_json(directory / "manifest.json", {"run_id": run["run_id"], "turn": turn, "payload_sha256": _hash(payload), "fact": fact, "created_by": "A", "at": now()})
-    _event(root, "task_written", role="A", turn=turn, fact=fact, injected=inject_failure)
+    atomic_json(directory / "manifest.json", {"run_id": run["run_id"], "turn": turn, "payload_sha256": _hash(payload), "body_sha256": _hash(body), "created_by": "real-Codex-A", "at": now()})
+    _event(root, "task_written", role="A", turn=turn, task_sha256=_hash(payload), injected=bool(decision.get("failure_injection", False)))
 
 
-def _decision(root: Path, run: dict, turn: int) -> tuple[str, int | None, str | None, bool]:
-    result = _read(root / "results" / f"{turn:04d}.json")
-    task = root / "tasks" / f"{turn:04d}"
-    manifest = _read(task / "manifest.json")
-    payload = (task / "task.json").read_bytes()
-    if result.get("run_id") != run["run_id"] or result.get("turn") != turn or result.get("payload_sha256") != manifest.get("payload_sha256") or _hash(payload) != manifest.get("payload_sha256"):
-        return "HUMAN_REQUIRED", None, "integrity mismatch", False
-    evidence = run.setdefault("evidence", {})
-    if result.get("status") == "FAILED":
-        if run.get("failure_recovery_used"):
-            return "COMPLETE", None, "failure reported deterministically", False
-        run["failure_recovery_used"] = True
-        return "CONTINUE", turn + 1, "recovery after durable worker failure", False
-    evidence[result["fact"]] = result["value"]
-    missing = [fact for fact in FACTS if fact not in evidence]
-    if missing:
-        return "CONTINUE", turn + 1, "bounded checklist remains", False
-    if not run.get("failure_injected"):
-        run["failure_injected"] = True
-        return "CONTINUE", turn + 1, "run one bounded failure injection", True
-    return "COMPLETE", None, "all bounded facts and failure recovery recorded", False
+def _decide(root: Path, run: dict, turn: int) -> tuple[str, dict]:
+    output = root / "agent_instructions" / f"controller-output-{turn:04d}.json"
+    _codex(root, "Controller Agent A", _controller_instruction(root, run, turn, output), Path(run["repository"]))
+    value = _read(output); decision = value.get("decision")
+    if decision not in DECISIONS: raise RuntimeError("Controller Codex emitted invalid decision")
+    if decision == "CONTINUE" and (not isinstance(value.get("task_body"), str) or not value["task_body"].strip()):
+        raise RuntimeError("Controller CONTINUE omitted task body")
+    return decision, value
 
 
 def controller(root: Path, turn: int, handoff: str) -> None:
     _ack(root, "A", handoff, turn)
-    # The first controller is launched directly by the bounded certification
-    # command. Every subsequent A has a B predecessor and must await release.
-    if handoff != "initial-A":
-        _await_release(root, "A", handoff, turn)
+    if handoff != "initial-A": _await_release(root, "A", handoff, turn)
     run_path = root / "run.json"; run = _read(run_path)
-    result_path = root / "results" / f"{turn:04d}.json"
-    if result_path.exists():
-        decision, next_turn, reason, inject = _decision(root, run, turn)
-        run["decisions"].append({"turn": turn, "decision": decision, "reason": reason, "at": now()})
-        run["status"] = decision
-        atomic_json(run_path, run)
-        _event(root, "controller_decision", role="A", turn=turn, decision=decision, reason=reason)
-        if decision != "CONTINUE":
-            atomic_json(root / "terminal" / "result.json", {"run_id": run["run_id"], "decision": decision, "reason": reason, "at": now()})
-            return
-        if inject or (run.get("failure_recovery_used") and turn > len(FACTS)):
-            fact = "clean"
-        else:
-            fact = FACTS[next_turn - 1]
-        _write_task(root, run, next_turn, fact, inject_failure=inject)
-        turn = next_turn
-    elif turn == 1:
-        _write_task(root, run, turn, FACTS[0])
-    else:
-        raise RuntimeError("controller resumed without durable result")
-    next_handoff = _handoff_id("B", turn)
-    child = _spawn(root, "B", turn, next_handoff)
-    _wait_successor(root, "B", next_handoff, turn, child.pid)
-    _event(root, "parent_exit_after_ack", role="A", turn=turn, child_pid=child.pid)
+    decision, value = _decide(root, run, turn)
+    run["decisions"].append({"turn": turn, "decision": decision, "reason": value.get("reason", ""), "at": now()}); run["status"] = decision; atomic_json(run_path, run)
+    _event(root, "controller_decision", role="A", turn=turn, decision=decision, reason=value.get("reason", ""))
+    if decision != "CONTINUE":
+        atomic_json(root / "terminal" / "result.json", {"run_id": run["run_id"], "decision": decision, "reason": value.get("reason", ""), "at": now()}); return
+    next_turn = turn + 1 if (root / "results" / f"{turn:04d}.json").exists() else turn
+    _write_task(root, run, next_turn, value)
+    handoff_id = _handoff_id("B", next_turn); child = _spawn(root, "B", next_turn, handoff_id)
+    _wait_successor(root, "B", handoff_id, next_turn, child.pid); _event(root, "parent_exit_after_ack", role="A", turn=next_turn, child_pid=child.pid)
 
 
 def worker(root: Path, turn: int, handoff: str) -> None:
-    task = root / "tasks" / f"{turn:04d}"
-    manifest = _read(task / "manifest.json"); payload = (task / "task.json").read_bytes(); request = json.loads(payload)
-    if _hash(payload) != manifest.get("payload_sha256") or request.get("turn") != turn:
-        raise RuntimeError("task hash/turn mismatch")
+    task = root / "tasks" / f"{turn:04d}"; manifest = _read(task / "manifest.json"); payload = (task / "task.json").read_bytes(); request = json.loads(payload)
+    if _hash(payload) != manifest.get("payload_sha256") or request.get("turn") != turn: raise RuntimeError("task hash/turn mismatch")
     claim = root / "claims" / f"{turn:04d}.json"
-    try:
-        fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise RuntimeError("duplicate task claim") from exc
+    try: fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc: raise RuntimeError("duplicate task claim") from exc
     with os.fdopen(fd, "w", encoding="utf-8") as output: json.dump({"turn": turn, "pid": os.getpid(), "role": "B", "handoff": handoff}, output)
-    _event(root, "task_claimed", role="B", turn=turn, pid=os.getpid())
-    _ack(root, "B", handoff, turn); _await_release(root, "B", handoff, turn)
+    _event(root, "task_claimed", role="B", turn=turn, pid=os.getpid()); _ack(root, "B", handoff, turn); _await_release(root, "B", handoff, turn)
+    output = root / "agent_instructions" / f"worker-output-{turn:04d}.json"
     try:
-        if request.get("inject_failure"):
-            raise RuntimeError("injected bounded worker failure")
-        value = _inspect(Path(request["repository"]), request["fact"])
-        outcome = {"run_id": request["run_id"], "turn": turn, "fact": request["fact"], "value": value, "status": "OK", "payload_sha256": _hash(payload), "worker_pid": os.getpid()}
-        exit_code = 0
+        _codex(root, "Worker Agent B", _worker_instruction(root, turn, task, output), Path(request["repository"]))
+        result = _read(output)
+        if result.get("status") not in {"OK", "FAILED"}: raise RuntimeError("Worker Codex emitted invalid status")
     except Exception as exc:
-        outcome = {"run_id": request["run_id"], "turn": turn, "fact": request["fact"], "status": "FAILED", "failure": type(exc).__name__, "payload_sha256": _hash(payload), "worker_pid": os.getpid()}
-        exit_code = 1
-    atomic_json(root / "results" / f"{turn:04d}.json", outcome)
-    _event(root, "result_written", role="B", turn=turn, status=outcome["status"])
-    next_handoff = _handoff_id("A", turn)
-    child = _spawn(root, "A", turn, next_handoff)
-    _wait_successor(root, "A", next_handoff, turn, child.pid)
-    _event(root, "parent_exit_after_ack", role="B", turn=turn, child_pid=child.pid)
-    if exit_code:
-        raise RuntimeError("worker exits nonzero after durable failure result")
+        result = {"status": "FAILED", "failure": f"{type(exc).__name__}: {exc}", "summary": "Worker bootstrap failure"}
+    outcome = {"run_id": request["run_id"], "turn": turn, "status": result["status"], "summary": str(result.get("summary", "")), "evidence": result.get("evidence", {}), "failure": result.get("failure"), "payload_sha256": _hash(payload), "worker_pid": os.getpid()}
+    atomic_json(root / "results" / f"{turn:04d}.json", outcome); _event(root, "result_written", role="B", turn=turn, status=outcome["status"])
+    handoff_id = _handoff_id("A", turn); child = _spawn(root, "A", turn, handoff_id)
+    _wait_successor(root, "A", handoff_id, turn, child.pid); _event(root, "parent_exit_after_ack", role="B", turn=turn, child_pid=child.pid)
 
 
-def initialize(root: Path, repository: Path, run_id: str) -> None:
+def initialize(root: Path, repository: Path, run_id: str, *, objective: str) -> None:
     _paths(root)
-    atomic_json(root / "run.json", {"run_id": run_id, "repository": str(repository.resolve()), "objective": "Collect ten harmless, mechanically verifiable repository facts, then prove bounded worker-failure recovery.", "completion_condition": "All ten facts are durable and a nonzero worker failure has returned to A and been recovered.", "required_facts": list(FACTS), "evidence": {}, "decisions": [], "status": "CONTINUE", "failure_injected": False, "failure_recovery_used": False})
+    atomic_json(root / "run.json", {"run_id": run_id, "repository": str(repository.resolve()), "objective": objective, "decisions": [], "status": "CONTINUE"})
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--root", required=True); parser.add_argument("--role", choices=("A", "B"), required=True); parser.add_argument("--turn", type=int, required=True); parser.add_argument("--handoff", required=True)
     args = parser.parse_args(argv); root = Path(args.root).resolve(); _paths(root)
-    try:
-        (controller if args.role == "A" else worker)(root, args.turn, args.handoff)
-    except Exception as exc:
-        _event(root, "failed", role=args.role, turn=args.turn, error=type(exc).__name__)
-        return 1
+    try: (controller if args.role == "A" else worker)(root, args.turn, args.handoff)
+    except Exception as exc: _event(root, "failed", role=args.role, turn=args.turn, error=type(exc).__name__, detail=str(exc)[:200]); return 1
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__": raise SystemExit(main())
