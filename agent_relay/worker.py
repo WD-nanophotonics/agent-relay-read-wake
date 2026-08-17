@@ -119,9 +119,16 @@ class OneShotWorker:
         prompt = (
             "Read the authoritative staged instruction at "
             f"{staged_path}. Treat that file as the sole task authority. "
-            "Complete it, run its requested checks, commit and push, verify "
-            "HEAD equals origin/main, then return a concise report. Do not "
-            "wait for Gmail or ChatGPT."
+            "Perform only its staged local repository task, requested checks, "
+            "commit and push, verify HEAD equals origin/main, then return a "
+            "concise report and exit normally to AgentRelay. Do not run pytest "
+            "or unittest discovery unless that staged task explicitly contains "
+            "PYTEST_EXPLICITLY_AUTHORIZED. OneShotWorker owns the normal "
+            "post-exit ChatGPT handoff and watchdog startup, so do not wait for "
+            "Gmail or ChatGPT. For routine engineering failures, use the "
+            "existing automated recovery/handoff path rather than asking a user "
+            "to relay messages. Preserve staged-file prompt transport; never "
+            "copy staged task bodies into process argv."
         )
         try:
             # Codex exposes these as mutually-exclusive approval modes.  Use the

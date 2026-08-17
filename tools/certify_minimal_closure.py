@@ -60,8 +60,13 @@ def main():
         finally:
             worker_module.subprocess.run = original_run
         assert bounded.ok and captured["argv"][-1] == "-" and str(staged_probe.resolve()) not in " ".join(map(str, captured["argv"])) and len(" ".join(map(str, captured["argv"]))) < 2000 and "AUTHORITATIVE" not in " ".join(map(str, captured["argv"]))
-        assert str(staged_probe.resolve()) in captured.get("input", "") and len(captured["input"]) < 1000 and "AUTHORITATIVE" not in captured["input"]
-        print("STAGED_INSTRUCTION_ARGV_BOUNDED_PASS")
+        prompt = captured.get("input", "")
+        assert str(staged_probe.resolve()) in prompt and len(prompt) < 2000 and "AUTHORITATIVE" not in prompt
+        assert "PYTEST_EXPLICITLY_AUTHORIZED" in prompt and "unittest discovery" in prompt
+        assert "OneShotWorker owns the normal post-exit ChatGPT handoff and watchdog startup" in prompt
+        assert "do not wait for Gmail or ChatGPT" in prompt and "automated recovery/handoff" in prompt
+        assert "never copy staged task bodies into process argv" in prompt
+        print("STAGED_INSTRUCTION_ARGV_BOUNDED_PASS"); print("CODEX_BOUNDARIES_BOOTSTRAP_PASS")
         helper = root / "bounded_sender.py"; helper.write_text("import sys; sys.stdin.read(); print('SUBMITTED')", encoding="utf-8")
         real_cfg = replace(cfg, handoff_command=f'"{sys.executable}" "{helper}"'); real_submission = CommandHandoffSender(real_cfg).submit("AGENTRELAY_CHATGPT_HANDOFF/1")
         assert real_submission.ok and real_submission.verified and real_submission.attempts == 1; print("REAL_CHATGPT_SENDER_INVOCATION_PASS")
