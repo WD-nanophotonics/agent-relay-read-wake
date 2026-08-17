@@ -153,9 +153,13 @@ def recover_pending_handoffs_once(config: Any, *, sender: Any | None = None) -> 
             worker_id = str(value["worker_id"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             continue
-        if value.get("state") == VERIFIED and (value.get("followup_owner_started") or (value.get("managed_entry") is False and value.get("message_id") is not None)):
-            continue
         owner = {"worker_id": worker_id, "pid": value.get("worker_pid"), "exe": value.get("worker_exe")}
+        current_state = StateStore(root).load()
+        stale_active = (isinstance(current_state.get("active_worker"), dict)
+                        and current_state["active_worker"].get("worker_id") == worker_id
+                        and not exact_owner_live(owner))
+        if value.get("state") == VERIFIED and not stale_active and (value.get("followup_owner_started") or (value.get("managed_entry") is False and value.get("message_id") is not None)):
+            continue
         if owner.get("pid") and exact_owner_live(owner):
             continue
         # A claimed Worker can die after the cursor has advanced but before
