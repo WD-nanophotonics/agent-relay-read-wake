@@ -131,7 +131,11 @@ def spawn_watchdog(config, *, run_id: str, after_step: int) -> dict[str, Any]:
     status = _status_template(watchdog_id=watchdog_id, pid=None, exe=Path(sys.executable).name, run_id=run_id, after_step=after_step, status="STARTING")
     _save_status(root, run_id, after_step, status)
     _append(ledger, "watchdog_spawn_requested", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=os.getpid())
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    # CREATE_NO_WINDOW keeps the relay quiet without putting the watchdog in a
+    # detached job that some Windows hosts terminate with its short-lived
+    # parent.  The process is still independently owned by the exact PID lock
+    # and the UI remains a normal taskbar window.
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         relay_root = Path(__file__).resolve().parents[1]
         child_env = os.environ.copy()

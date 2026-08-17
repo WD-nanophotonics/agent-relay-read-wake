@@ -11,7 +11,7 @@ from typing import Callable
 from uuid import uuid4
 
 from .handoff import build_actionable_report, CommandHandoffSender, update_watchdog_startup_evidence, write_evidence
-from .obligations import attempt_handoff, create_obligation, mark_result_ready
+from .obligations import attempt_handoff, create_obligation, mark_result_ready, update_obligation
 from .ownership import exact_owner_live
 from .storage import Ledger, StateStore, now
 
@@ -180,6 +180,11 @@ class OneShotWorker:
                             pass
                         self.ledger.append("watchdog_start_confirmed" if watchdog_verified else "watchdog_start_failed", worker_id=owner["worker_id"], step=step, detail=watchdog_detail)
                         continuation_ok = watchdog_verified
+                        try:
+                            update_obligation(self.config.local_project_storage, owner["worker_id"],
+                                              followup_owner_started=watchdog_verified)
+                        except Exception:
+                            continuation_ok = False
                 else:
                     self.ledger.append("terminal_handoff_pending", worker_id=owner["worker_id"], step=step, outcome=terminal_kind)
                 lifecycle_ok = terminal_kind == "SUCCESS" and verified and continuation_ok

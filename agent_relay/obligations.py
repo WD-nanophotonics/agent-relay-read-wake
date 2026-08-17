@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import json
+import os
 
 from .handoff import build_actionable_report, ACTION_SEND_RECOVERY
 from .ownership import exact_owner_live
@@ -56,6 +57,8 @@ def create_obligation(root: Path, *, worker_id: str, run_id: str, step: int, par
         "send_attempts": 0,
         "submission_verified": False,
         "verified_at": None,
+        "managed_entry": os.environ.get("AGENT_RELAY_MANAGED_AGENT") == "1",
+        "followup_owner_started": False,
         "last_error": None,
     }
     path = obligation_path(root, worker_id)
@@ -150,7 +153,7 @@ def recover_pending_handoffs_once(config: Any, *, sender: Any | None = None) -> 
             worker_id = str(value["worker_id"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             continue
-        if value.get("state") == VERIFIED:
+        if value.get("state") == VERIFIED and (value.get("followup_owner_started") or (value.get("managed_entry") is False and value.get("message_id") is not None)):
             continue
         owner = {"worker_id": worker_id, "pid": value.get("worker_pid"), "exe": value.get("worker_exe")}
         if owner.get("pid") and exact_owner_live(owner):
@@ -173,5 +176,14 @@ def recover_pending_handoffs_once(config: Any, *, sender: Any | None = None) -> 
                               detail=detail, error=detail, report=report,
                               branch=value.get("branch"), baseline_sha=value.get("baseline_sha"),
                               remote_head=value.get("remote_head"))
-        recovered.append(attempt_handoff(root, worker_id, sender))
+        recovered_value = attempt_handoff(root, worker_id, sender)
+        if recovered_value.get("state") == VERIFIED and (recovered_value.get("managed_entry") or recovered_value.get("message_id") is None) and not recovered_value.get("followup_owner_started"):
+            try:
+                from .watchdog import spawn_watchdog
+                launch = spawn_watchdog(config, run_id=str(recovered_value["run_id"]), after_step=int(recovered_value["step"]))
+                recovered_value = update_obligation(root, worker_id,
+                    followup_owner_started=bool(launch.get("started") or launch.get("detail") == "watchdog already owned"))
+            except Exception as exc:
+                recovered_value = update_obligation(root, worker_id, last_error=f"FOLLOWUP_OWNER_FAILED: {type(exc).__name__}")
+        recovered.append(recovered_value)
     return recovered
