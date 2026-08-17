@@ -46,7 +46,7 @@ class MinimalRelayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.cfg = RelayConfig("gmail-courier", "Gmail Courier", "AR-GMAILCOURIER-A1R7P", root, root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
+        self.cfg = RelayConfig("gmail-courier", "Gmail Courier", "AR-GMAILCOURIER-A1R7P", Path.cwd(), root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
     def tearDown(self):
         self.tmp.cleanup()
     def msg(self, mid="m1", step=1, parent=0, disposition="WAKE", attachments=()):

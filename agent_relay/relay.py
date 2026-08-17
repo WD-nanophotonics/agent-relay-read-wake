@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 from typing import Callable, Protocol
 from uuid import uuid4
+from contextlib import contextmanager
 
 from .gmail import GmailGateway, GmailMessage
 from .protocol import Disposition, ProtocolEnvelope, ProtocolError, parse_envelope
@@ -22,6 +24,34 @@ def message_hash(message: GmailMessage) -> str:
 
 
 _owner_live = exact_owner_live
+
+
+@contextmanager
+def poll_transaction_lock(root: Path):
+    """Short-lived cross-process mutex for one poll-once transaction."""
+    path = root / "poll-once.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"pid={os.getpid()}\nexe={Path(os.sys.executable).name}\n".encode())
+        os.close(fd)
+        acquired = True
+    except FileExistsError:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            owner = {"pid": int(next(item.split("=", 1)[1] for item in lines if item.startswith("pid="))), "exe": next(item.split("=", 1)[1] for item in lines if item.startswith("exe="))}
+            if not exact_owner_live(owner):
+                path.unlink(missing_ok=True)
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"pid={os.getpid()}\nexe={Path(os.sys.executable).name}\n".encode()); os.close(fd); acquired = True
+        except (OSError, StopIteration, ValueError, FileExistsError):
+            acquired = False
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -43,6 +73,13 @@ class Relay:
         self.ledger = Ledger(config.local_project_storage)
 
     def poll_once(self) -> PollResult:
+        with poll_transaction_lock(self.config.local_project_storage) as acquired:
+            if not acquired:
+                self.ledger.append("poll_skipped_lock")
+                return PollResult("busy")
+            return self._poll_once()
+
+    def _poll_once(self) -> PollResult:
         state = self.store.load()
         if state.get("stop_requested"):
             self.ledger.append("poll_skipped_stop")

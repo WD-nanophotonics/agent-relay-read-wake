@@ -11,7 +11,7 @@ from agent_relay.gmail import GmailMessage
 from agent_relay.handoff import HandoffSubmission, CommandHandoffSender
 from agent_relay.ownership import exact_owner_live
 from agent_relay.protocol import parse_envelope
-from agent_relay.relay import Relay
+from agent_relay.relay import Relay, poll_transaction_lock
 from agent_relay.storage import StateStore, stage_instruction
 from agent_relay.watchdog import run_watchdog
 from agent_relay.worker import OneShotWorker, WorkerOutcome
@@ -43,7 +43,7 @@ class Launcher:
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp); cfg = RelayConfig("gmail-courier", "Gmail", "AR-GMAILCOURIER-A1R7P", root, root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
+        root = Path(tmp); cfg = RelayConfig("gmail-courier", "Gmail", "AR-GMAILCOURIER-A1R7P", Path.cwd(), root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
         msg = GmailMessage("m1", "t", None, body(), ())
         helper = root / "bounded_sender.py"; helper.write_text("import sys; sys.stdin.read(); print('SUBMITTED')", encoding="utf-8")
         real_cfg = replace(cfg, handoff_command=f'"{sys.executable}" "{helper}"'); real_submission = CommandHandoffSender(real_cfg).submit("AGENTRELAY_CHATGPT_HANDOFF/1")
@@ -51,6 +51,8 @@ def main():
         events = []; sender = Sender(events=events); worker = OneShotWorker(cfg, executor=lambda text, path: (events.append("work") or WorkerOutcome(True, "ok")), handoff_sender=sender, watchdog_spawn=lambda step, run: events.append("watchdog"))
         staged = stage_instruction(cfg.local_project_storage, msg, parse_envelope(msg.body)); assert worker.run(run_id="RUN-CERT-001", step=1, staged_path=staged).ok
         assert len(sender.calls) == 1 and events.index("handoff") < events.index("watchdog"); print("REAL_CHATGPT_HANDOFF_PASS")
+        assert StateStore(cfg.local_project_storage).load()["active_worker"] is None; assert events[-1] == "watchdog"; print("WORKER_EXIT_AFTER_HANDOFF_PASS"); print("WATCHDOG_STARTED_AFTER_REAL_HANDOFF_PASS")
+        report_lines = sender.calls[0].splitlines(); assert any(line.startswith("BASELINE_SHA: ") and len(line) > 13 for line in report_lines); assert any(line.startswith("REMOTE_HEAD: ") and len(line) > 13 for line in report_lines); print("MECHANICAL_GIT_PROVENANCE_PASS")
 
         failed_events = []; failed = Sender(False, failed_events); worker = OneShotWorker(cfg, executor=lambda text, path: WorkerOutcome(True, "ok"), handoff_sender=failed, watchdog_spawn=lambda step, run: failed_events.append("watchdog"))
         staged2 = stage_instruction(root / "failed", msg, parse_envelope(msg.body)); assert not worker.run(run_id="RUN-CERT-001", step=1, staged_path=staged2).ok and "watchdog" not in failed_events; print("FAILED_HANDOFF_NO_WATCHDOG_PASS")
@@ -58,6 +60,11 @@ def main():
         dead = Launcher(99999999); relay = Relay(cfg, Mail([msg]), dead); assert relay.poll_once().action == "launched"; state = StateStore(cfg.local_project_storage).load(); assert state["expected_step"] == 1 and not state["consumed_message_ids"]; assert relay.poll_once().action == "launched"; print("NO_STEP_LOSS_BEFORE_CLAIM_PASS")
 
         live = Launcher(__import__("os").getpid()); relay = Relay(replace(cfg, local_project_storage=root / "live"), Mail([msg]), live); assert relay.poll_once().action == "launched" and relay.poll_once().action == "busy" and len(live.calls) == 1; print("SINGLE_WORKER_PASS")
+        lock_root = root / "mutex"
+        with poll_transaction_lock(lock_root) as first:
+            with poll_transaction_lock(lock_root) as second:
+                assert first is True and second is False
+        print("SINGLE_POLL_PROCESS_PASS")
 
         claim_root = root / "claim"; claim_cfg = replace(cfg, local_project_storage=claim_root); claim_msg = GmailMessage("claim", "t", None, body(), ()); claim_stage = stage_instruction(claim_root, claim_msg, parse_envelope(claim_msg.body)); store = StateStore(claim_root); store.save({**store.load(), "pending_worker": {"worker_id": "claimed", "pid": __import__("os").getpid(), "project_id": "gmail-courier", "run_id": "RUN-CERT-001", "step": 1, "parent": 0, "message_id": "claim", "content_hash": "h", "exe": "python.exe"}}); claim_sender = Sender(); claim_worker = OneShotWorker(claim_cfg, executor=lambda text, path: WorkerOutcome(True, "ok"), handoff_sender=claim_sender); assert claim_worker.run(run_id="RUN-CERT-001", step=1, staged_path=claim_stage, worker_id="claimed", message_id="claim", content_hash="h").ok; assert StateStore(claim_root).load()["consumed_message_ids"] == ["claim"]; print("TRANSACTIONAL_WORKER_CLAIM_PASS")
 

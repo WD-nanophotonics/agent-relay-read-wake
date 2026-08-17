@@ -34,7 +34,10 @@ class CommandHandoffSender:
         self.chat_url = str(config.chat_url)
 
     def submit(self, report: str) -> HandoffSubmission:
-        if not self.command or self.chat_url != EXPECTED_CHAT_URL:
+        if not self.command:
+            from .chatgpt_sender import BrowserChatGPTSender
+            return BrowserChatGPTSender(type("Config", (), {"chat_url": self.chat_url})()).submit(report)
+        if self.chat_url != EXPECTED_CHAT_URL:
             return HandoffSubmission(False, "fixed ChatGPT sender is not configured")
         try:
             result = subprocess.run([*shlex.split(self.command), "--url", self.chat_url], input=report, text=True, capture_output=True, timeout=120, check=False)

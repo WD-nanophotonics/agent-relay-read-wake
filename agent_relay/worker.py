@@ -69,12 +69,14 @@ class OneShotWorker:
     def run(self, *, run_id: str, step: int, staged_path: Path, worker_id: str | None = None, message_id: str | None = None, content_hash: str | None = None) -> WorkerOutcome:
         owner = self.claim(run_id=run_id, step=step, staged_path=staged_path, worker_id=worker_id, message_id=message_id, content_hash=content_hash)
         outcome = WorkerOutcome(False, "worker did not complete")
+        baseline_sha = ""
         try:
+            baseline_sha = self._git_value("rev-parse", "HEAD")
             instruction = (staged_path / "message.txt").read_text(encoding="utf-8")
             outcome = self.executor(instruction, self.config.repo_path)
             if not outcome.ok:
                 raise RuntimeError(outcome.detail)
-            self._write_handoff(run_id, step, owner, outcome.detail)
+            self._write_handoff(run_id, step, owner, outcome.detail, baseline_sha=baseline_sha)
             self.ledger.append("worker_completed", worker_id=owner["worker_id"], step=step)
             if self.watchdog_spawn:
                 self.watchdog_spawn(step, run_id)
@@ -103,8 +105,17 @@ class OneShotWorker:
         detail = (result.stdout or result.stderr or "").strip()[-4000:]
         return WorkerOutcome(result.returncode == 0, detail)
 
-    def _write_handoff(self, run_id: str, step: int, owner: dict, detail: str) -> Path:
-        report = build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id, channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], repository=str(self.config.repo_path), branch="main", baseline_sha="", remote_head="", tests="worker-reported", summary=detail or "bounded worker completed", blockers="none", next_boundary="audit remote and send next Gmail")
+    def _git_value(self, *args: str) -> str:
+        result = subprocess.run(["git", "-C", str(self.config.repo_path), *args], capture_output=True, text=True, timeout=15, check=False)
+        value = (result.stdout or "").strip()
+        if result.returncode != 0 or not value:
+            raise RuntimeError(f"git provenance unavailable: {' '.join(args)}")
+        return value
+
+    def _write_handoff(self, run_id: str, step: int, owner: dict, detail: str, *, baseline_sha: str) -> Path:
+        branch = self._git_value("branch", "--show-current")
+        remote_head = self._git_value("rev-parse", "origin/main")
+        report = build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id, channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"], handoff_token=owner["worker_id"], repository=str(self.config.repo_path), branch=branch, baseline_sha=baseline_sha, remote_head=remote_head, tests="worker-command-exit=0", summary=detail or "bounded worker completed", blockers="none", next_boundary="audit remote and send next Gmail")
         submission = self.handoff_sender.submit(report)
         if not submission.ok or not submission.verified or submission.attempts != 1:
             raise RuntimeError(f"ChatGPT handoff not verified: {submission.detail}")
