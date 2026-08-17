@@ -93,6 +93,9 @@ class OneShotWorker:
         baseline_sha: str | None = None
         branch: str | None = None
         remote_head: str | None = None
+        ending_sha: str | None = None
+        changed_files: str | None = None
+        exit_code: int | None = None
         terminal_kind = "WORKER_INTERNAL_EXCEPTION"
         terminal_error: str | None = None
         try:
@@ -101,13 +104,8 @@ class OneShotWorker:
                 branch = self._git_value("branch", "--show-current")
                 try:
                     remote_head = self._git_value("rev-parse", "origin/main")
-                except Exception as exc:
-                    if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") == "1":
-                        remote_head = baseline_sha
-                    else:
-                        terminal_kind = "GIT_PROVENANCE_FAILED"
-                        terminal_error = type(exc).__name__
-                        raise
+                except Exception:
+                    remote_head = None
             except Exception as exc:
                 terminal_kind = "GIT_PROVENANCE_FAILED"
                 terminal_error = type(exc).__name__
@@ -118,6 +116,15 @@ class OneShotWorker:
             # authoritative instruction never expands the worker argv.
             executor_input = staged_path if self._uses_default_executor else instruction
             outcome = self.executor(executor_input, self.config.repo_path)
+            try:
+                ending_sha = self._git_value("rev-parse", "HEAD")
+                status_result = subprocess.run(["git", "-C", str(self.config.repo_path), "status", "--short"], capture_output=True, text=True, timeout=15, check=False)
+                changed_files = (status_result.stdout or "").strip() or "clean"
+            except Exception:
+                ending_sha = baseline_sha
+                changed_files = "UNKNOWN"
+            active_after = self.store.load().get("active_worker") or {}
+            exit_code = active_after.get("codex_exit_code")
             if outcome.ok:
                 terminal_kind = "SUCCESS"
             else:
@@ -130,11 +137,14 @@ class OneShotWorker:
             obligation = {"state": "RESULT_READY", "submission_verified": False}
             try:
                 report = self._build_terminal_report(run_id, step, owner, outcome, terminal_kind,
-                                                     terminal_error, branch, baseline_sha, remote_head)
+                                                     terminal_error, branch, baseline_sha, remote_head,
+                                                     ending_sha, changed_files, exit_code)
                 mark_result_ready(self.config.local_project_storage, owner["worker_id"],
                                   outcome=terminal_kind, detail=outcome.detail,
-                                  error=terminal_error, report=report, branch=branch,
-                                  baseline_sha=baseline_sha, remote_head=remote_head)
+                              error=terminal_error, report=report, branch=branch,
+                              baseline_sha=baseline_sha, remote_head=remote_head,
+                              ending_sha=ending_sha, changed_files=changed_files,
+                              exit_code=exit_code)
                 obligation = attempt_handoff(self.config.local_project_storage, owner["worker_id"], self.handoff_sender)
                 verified = obligation.get("state") == "VERIFIED" and obligation.get("submission_verified") is True
                 if verified:
@@ -192,20 +202,25 @@ class OneShotWorker:
         if active.get("codex_pid") and active.get("codex_exit_code") not in (None, 0):
             return "CODEX_EXIT_NONZERO"
         if status == "CODEX_START_FAILED" or not active.get("codex_pid"):
+            if status == "NOT_STARTED":
+                return "WORKER_INTERNAL_EXCEPTION"
             return "CODEX_PROCESS_CREATE_FAILED"
         return "WORKER_INTERNAL_EXCEPTION"
 
     def _build_terminal_report(self, run_id: str, step: int, owner: dict, outcome: WorkerOutcome,
                                terminal_kind: str, terminal_error: str | None,
                                branch: str | None, baseline_sha: str | None,
-                               remote_head: str | None) -> str:
+                               remote_head: str | None, ending_sha: str | None = None,
+                               changed_files: str | None = None, exit_code: int | None = None) -> str:
         return build_actionable_report(run_id=run_id, step=step, project_id=self.config.project_id,
             channel_id=self.config.channel_id, lease_id=owner["worker_id"], worker_id=owner["worker_id"],
             handoff_token=owner["handoff_token"], repository=str(self.config.repo_path),
             branch=branch or "UNKNOWN", baseline_sha=baseline_sha or "UNKNOWN", remote_head=remote_head or "UNKNOWN",
             tests=f"terminal-outcome={terminal_kind}", summary=outcome.detail or terminal_kind,
             blockers=terminal_error or "none", next_boundary="audit terminal result and send next Gmail",
-            status="WORK_COMPLETED" if terminal_kind == "SUCCESS" else "WORKER_FAILED", error=terminal_error)
+            status="WORK_COMPLETED" if terminal_kind == "SUCCESS" else "WORKER_FAILED", error=terminal_error,
+            starting_sha=baseline_sha, ending_sha=ending_sha, exit_code=exit_code,
+            terminal_outcome=terminal_kind, changed_files=changed_files)
 
     def _record_codex(self, status: str, *, pid: int | None = None, exe: str | None = None, error: str | None = None, exit_code: int | None = None) -> None:
         owner = self._current_owner

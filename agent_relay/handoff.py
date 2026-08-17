@@ -48,7 +48,7 @@ class CommandHandoffSender:
         return HandoffSubmission(verified, output[-1000:].strip() or f"exit={result.returncode}", verified=verified)
 
 
-def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None, status: str = "WORK_COMPLETED", error: str | None = None) -> str:
+def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None, status: str = "WORK_COMPLETED", error: str | None = None, starting_sha: str | None = None, ending_sha: str | None = None, exit_code: int | None = None, terminal_outcome: str | None = None, changed_files: str | None = None) -> str:
     """Build the deterministic Phase 2I return-path message."""
     next_step = step + 1 if next_step is None else next_step
     next_parent = step if next_parent is None else next_parent
@@ -68,6 +68,11 @@ def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_
         f"BRANCH: {branch}",
         f"BASELINE_SHA: {baseline_sha}",
         f"REMOTE_HEAD: {remote_head}",
+        f"STARTING_SHA: {starting_sha or baseline_sha}",
+        f"ENDING_SHA: {ending_sha or baseline_sha}",
+        *( [f"EXIT_CODE: {exit_code}"] if exit_code is not None else [] ),
+        *( [f"TERMINAL_OUTCOME: {terminal_outcome}"] if terminal_outcome else [] ),
+        *( [f"CHANGED_FILES: {changed_files}"] if changed_files else [] ),
         "",
         f"STATUS: {status}",
         *( [f"ERROR: {error}"] if error else [] ),

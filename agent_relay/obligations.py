@@ -38,6 +38,9 @@ def create_obligation(root: Path, *, worker_id: str, run_id: str, step: int, par
         "branch": None,
         "baseline_sha": None,
         "remote_head": None,
+        "ending_sha": None,
+        "changed_files": None,
+        "exit_code": None,
         "message_id": message_id,
         "content_hash": content_hash,
         "worker_pid": worker_pid,
@@ -82,11 +85,15 @@ def update_obligation(root: Path, worker_id: str, **changes: Any) -> dict[str, A
 
 def mark_result_ready(root: Path, worker_id: str, *, outcome: str, detail: str,
                       error: str | None, report: str, branch: str | None,
-                      baseline_sha: str | None, remote_head: str | None) -> dict[str, Any]:
+                      baseline_sha: str | None, remote_head: str | None,
+                      ending_sha: str | None = None, changed_files: str | None = None,
+                      exit_code: int | None = None) -> dict[str, Any]:
     return update_obligation(root, worker_id, state=RESULT_READY,
                              terminal_outcome=outcome, terminal_detail=detail,
                              terminal_error=error, report=report, branch=branch,
                              baseline_sha=baseline_sha, remote_head=remote_head,
+                             ending_sha=ending_sha, changed_files=changed_files,
+                             exit_code=exit_code,
                              last_error=None)
 
 

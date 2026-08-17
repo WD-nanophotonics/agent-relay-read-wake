@@ -4,11 +4,14 @@ import argparse
 import json
 import os
 from pathlib import Path
+from uuid import uuid4
 
 from .config import app_home, config_path, load_config, save_binding, write_example
 from .gmail import GoogleGmailGateway
 from .relay import NoopWorkerLauncher, Relay
-from .storage import StateStore
+from .storage import StateStore, read_content_hash
+from .protocol import Disposition, ProtocolEnvelope
+from .ownership import exact_owner_live
 from .watchdog import run_watchdog
 from .worker import OneShotWorker, ProcessWorkerLauncher
 from .handoff import HandoffSubmission
@@ -23,9 +26,10 @@ class _DiagnosticHandoffSink:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "poll-once", "worker", "watchdog", "watchdog-ui", "monitor", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
+    parser.add_argument("command", choices=("init", "poll-once", "run-agent", "worker", "watchdog", "watchdog-ui", "monitor", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
     parser.add_argument("--run")
     parser.add_argument("--step", type=int)
+    parser.add_argument("--parent", type=int)
     parser.add_argument("--after-step", type=int)
     parser.add_argument("--staged")
     parser.add_argument("--worker-id")
@@ -74,11 +78,47 @@ def main(argv=None) -> int:
         result = Relay(config, GoogleGmailGateway(config.gmail_auth_home), ProcessWorkerLauncher()).poll_once()
         print(json.dumps({"action": result.action, "message_id": result.message_id}, sort_keys=True))
         return 0
+    if args.command == "run-agent":
+        if not args.staged:
+            parser.error("run-agent requires --staged")
+        staged = Path(args.staged).resolve()
+        if not (staged / "message.txt").is_file() or not (staged / "manifest.json").is_file():
+            parser.error("run-agent staged path must contain message.txt and manifest.json")
+        run_id = args.run or f"RUN-MANAGED-{uuid4().hex.upper()}"
+        step = args.step or 1
+        parent = args.parent if args.parent is not None else step - 1
+        state = store.load()
+        owner = state.get("active_worker") or state.get("pending_worker")
+        if owner and exact_owner_live(owner):
+            raise RuntimeError("managed AgentRelay project already has a live owner")
+        if owner:
+            state.update({"active_worker": None, "pending_worker": None, "mode": "IDLE"})
+            store.save(state)
+        envelope = ProtocolEnvelope(config.channel_id, run_id, step, parent, Disposition.WAKE, config.project_id)
+        previous = os.environ.get("AGENT_RELAY_MANAGED_AGENT")
+        os.environ["AGENT_RELAY_MANAGED_AGENT"] = "1"
+        try:
+            worker = ProcessWorkerLauncher().launch(staged_path=staged, envelope=envelope, content_hash=read_content_hash(staged), message_id="")
+        finally:
+            if previous is None:
+                os.environ.pop("AGENT_RELAY_MANAGED_AGENT", None)
+            else:
+                os.environ["AGENT_RELAY_MANAGED_AGENT"] = previous
+        worker.update({"parent": parent, "message_id": None, "content_hash": read_content_hash(staged), "staged_path": str(staged), "managed_entry": True})
+        state = store.load()
+        state.update({"mode": "BUSY", "pending_worker": worker, "last_error": None})
+        store.save(state)
+        from .storage import Ledger
+        Ledger(config.local_project_storage).append("managed_agent_process_created", worker_id=worker.get("worker_id"), pid=worker.get("pid"), run_id=run_id, step=step)
+        print(json.dumps({"action": "managed_agent_started", "run": run_id, "step": step, "worker": worker}, sort_keys=True))
+        return 0
     if args.command == "worker":
         if not args.run or args.step is None or not args.staged:
             parser.error("worker requires --run, --step, and --staged")
         if os.environ.get("AGENT_RELAY_DIAGNOSTIC_POST_EXIT_SINK") == "1":
             worker = OneShotWorker(config, handoff_sender=_DiagnosticHandoffSink(), watchdog_spawn=None)
+        elif os.environ.get("AGENT_RELAY_MANAGED_AGENT") == "1":
+            worker = OneShotWorker(config, watchdog_spawn=None)
         else:
             worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
         outcome = worker.run(run_id=args.run, step=args.step, staged_path=Path(args.staged), worker_id=args.worker_id, message_id=args.message_id, content_hash=args.content_hash)

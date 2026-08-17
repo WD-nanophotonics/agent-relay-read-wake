@@ -19,12 +19,13 @@ Python Gmail poll-once
 python -m pip install -e ".[dev]"
 agent-relay init
 agent-relay poll-once
+agent-relay run-agent --staged <staged-instruction-directory>
 agent-relay status
 agent-relay stop
 agent-relay watchdog-ui
 ```
 
-`test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。Worker 使用配置的 Codex 命令执行单个暂存任务，生成 `AGENTRELAY_CHATGPT_HANDOFF/1` 后通过 `handoff_command` 调用一次性固定 URL sender；sender 必须在 stdout 给出 `SUBMITTED`，否则不写成功证据、不启动 watchdog。成功后才写本地审计副本并启动一次 detached watchdog。Watchdog 用 `project + RUN + AFTER_STEP` 精确锁去重，最多等待/调用两次 `poll-once`，绝不打断活动 Worker、递归唤醒或常驻运行。
+`test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。`run-agent` 是手动/外部启动 Relay Agent 的唯一 managed entry：它创建 pending owner，启动一个真实 Worker，Worker 负责读取 staged task、记录终端结果、写入 `handoff_obligations/<worker_id>.json`，并在固定 ChatGPT token 验证后才结束。直接打开的 naked Codex 属于 unmanaged debug process，不享受 AgentRelay 生命周期保证。每个 claimed Worker 都必须经历 `OPEN → RESULT_READY → SENDING → VERIFIED`；失败 handoff 不会删除债务，下一次 `poll-once` 会执行一次有界恢复。Watchdog 只能在 handoff `VERIFIED` 后启动。
 
 `watchdog-ui` 是只读 Tkinter 监视器：它读取 `watchdogs/<RUN>-after-<STEP>.json`、状态快照和 JSONL 账本，显示启动确认、存活 PID、当前尝试、下一次 poll 倒计时、最近结果和终止原因。它不读取 Gmail、不启动 Worker，也不影响 watchdog；关闭窗口不会停止后台 watchdog。没有记录时会显示 `NO ACTIVE WATCHDOG`。
 
