@@ -7,8 +7,9 @@ import sys
 import time
 from contextlib import contextmanager
 
-from .relay import Relay, _owner_live
-from .storage import Ledger, StateStore, atomic_json, now
+from .relay import Relay
+from .ownership import exact_owner_live
+from .storage import Ledger, StateStore, now
 
 
 @contextmanager
@@ -23,8 +24,8 @@ def exact_watchdog_lock(root: Path, run_id: str, after_step: int):
         try:
             text = lock.read_text(encoding="utf-8")
             pid = int(next((line.split("=", 1)[1] for line in text.splitlines() if line.startswith("pid=")), "-1"))
-            if pid > 0:
-                os.kill(pid, 0)
+            exe = next((line.split("=", 1)[1] for line in text.splitlines() if line.startswith("exe=")), "")
+            if exact_owner_live({"pid": pid, "exe": exe}):
                 yield False
                 return
         except (OSError, ValueError):
@@ -36,7 +37,7 @@ def exact_watchdog_lock(root: Path, run_id: str, after_step: int):
             yield False
             return
     try:
-        os.write(fd, f"pid={os.getpid()}\ncreated={now()}\n".encode())
+        os.write(fd, f"pid={os.getpid()}\nexe={Path(sys.executable).name}\ncreated={now()}\n".encode())
         os.close(fd)
         yield True
     finally:
@@ -63,7 +64,7 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory, sleep=ti
                 ledger.append("watchdog_stopped", run_id=run_id, after_step=after_step)
                 return "stopped"
             owner = state.get("active_worker")
-            if owner and _owner_live(owner):
+            if owner and exact_owner_live(owner):
                 ledger.append("watchdog_active_worker", worker_id=owner.get("worker_id"), attempt=attempt + 1)
                 return "active"
             if state.get("current_run") == run_id and int(state.get("expected_step", 0)) != after_step + 1:

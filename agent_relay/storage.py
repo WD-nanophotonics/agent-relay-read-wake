@@ -37,6 +37,7 @@ def default_state() -> dict[str, Any]:
         "consumed_message_ids": [],
         "logical_hashes": {},
         "stop_requested": False,
+        "pending_worker": None,
         "active_worker": None,
         "last_error": None,
     }
@@ -55,7 +56,7 @@ class StateStore:
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"malformed relay state: {self.path}") from exc
         if not isinstance(value, dict) or not isinstance(value.get("consumed_message_ids", []), list):
-            raise ValueError("malformed supervisor state fields")
+            raise ValueError("malformed relay state fields")
         # Old lease/lifecycle fields are deliberately not carried into the
         # terminating-worker model.
         migrated = default_state()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shlex
+import subprocess
 from typing import Any
 
 from .config import EXPECTED_CHAT_URL
@@ -9,6 +11,38 @@ from .storage import atomic_json, now
 
 
 PROTOCOL = "AGENTRELAY_HANDOFF/1"
+
+
+class HandoffSubmission:
+    def __init__(self, ok: bool, detail: str, *, attempts: int = 1, verified: bool = False):
+        self.ok = ok
+        self.detail = detail
+        self.attempts = attempts
+        self.verified = verified
+
+
+class CommandHandoffSender:
+    """Bounded bridge to the installed fixed-URL ChatGPT sender.
+
+    The command receives ``--url <fixed-url>`` and the exact handoff envelope
+    on stdin, and must print ``SUBMITTED`` after the UI/API submission is
+    visibly acknowledged. It is one short-lived process, never a supervisor.
+    """
+
+    def __init__(self, config):
+        self.command = str(getattr(config, "handoff_command", ""))
+        self.chat_url = str(config.chat_url)
+
+    def submit(self, report: str) -> HandoffSubmission:
+        if not self.command or self.chat_url != EXPECTED_CHAT_URL:
+            return HandoffSubmission(False, "fixed ChatGPT sender is not configured")
+        try:
+            result = subprocess.run([*shlex.split(self.command), "--url", self.chat_url], input=report, text=True, capture_output=True, timeout=120, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return HandoffSubmission(False, type(exc).__name__)
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        verified = result.returncode == 0 and "SUBMITTED" in output.upper()
+        return HandoffSubmission(verified, output[-1000:].strip() or f"exit={result.returncode}", verified=verified)
 
 
 def build_actionable_report(*, run_id: str, step: int, project_id: str, channel_id: str, lease_id: str, worker_id: str, handoff_token: str, repository: str, branch: str, baseline_sha: str, remote_head: str, tests: str, summary: str, blockers: str, next_boundary: str, next_step: int | None = None, next_parent: int | None = None) -> str:

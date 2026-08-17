@@ -20,6 +20,8 @@ def main(argv=None) -> int:
     parser.add_argument("--after-step", type=int)
     parser.add_argument("--staged")
     parser.add_argument("--worker-id")
+    parser.add_argument("--message-id")
+    parser.add_argument("--content-hash")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
     args = parser.parse_args(argv)
@@ -66,7 +68,7 @@ def main(argv=None) -> int:
         if not args.run or args.step is None or not args.staged:
             parser.error("worker requires --run, --step, and --staged")
         worker = OneShotWorker(config, watchdog_spawn=lambda step, run: _spawn_watchdog(config, run, step))
-        outcome = worker.run(run_id=args.run, step=args.step, staged_path=Path(args.staged), worker_id=args.worker_id)
+        outcome = worker.run(run_id=args.run, step=args.step, staged_path=Path(args.staged), worker_id=args.worker_id, message_id=args.message_id, content_hash=args.content_hash)
         print(json.dumps({"ok": outcome.ok, "detail": outcome.detail}, ensure_ascii=False))
         return 0 if outcome.ok else 1
     if args.command == "watchdog":

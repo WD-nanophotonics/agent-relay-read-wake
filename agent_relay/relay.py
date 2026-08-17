@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import os
 from pathlib import Path
 from typing import Callable, Protocol
 from uuid import uuid4
@@ -10,10 +9,11 @@ from uuid import uuid4
 from .gmail import GmailGateway, GmailMessage
 from .protocol import Disposition, ProtocolEnvelope, ProtocolError, parse_envelope
 from .storage import Ledger, StateStore, stage_instruction, now
+from .ownership import exact_owner_live
 
 
 class WorkerLauncher(Protocol):
-    def launch(self, *, staged_path: Path, envelope: ProtocolEnvelope, content_hash: str) -> dict: ...
+    def launch(self, *, staged_path: Path, envelope: ProtocolEnvelope, content_hash: str, message_id: str) -> dict: ...
 
 
 def message_hash(message: GmailMessage) -> str:
@@ -21,38 +21,7 @@ def message_hash(message: GmailMessage) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _owner_live(owner: dict | None) -> bool:
-    if not owner or not isinstance(owner.get("pid"), int):
-        return False
-    pid = owner["pid"]
-    if pid <= 0:
-        return False
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
-    # QueryFullProcessImageNameW avoids the Windows os.kill false positive.
-    try:
-        import ctypes
-        from ctypes import wintypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            size = wintypes.DWORD(32768)
-            buf = ctypes.create_unicode_buffer(size.value)
-            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
-            if not ok:
-                return False
-            expected = str(owner.get("exe") or "").lower()
-            return not expected or Path(buf.value).name.lower() == Path(expected).name.lower()
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
-    except (AttributeError, OSError):
-        return False
+_owner_live = exact_owner_live
 
 
 @dataclass(frozen=True)
@@ -78,15 +47,15 @@ class Relay:
         if state.get("stop_requested"):
             self.ledger.append("poll_skipped_stop")
             return PollResult("stopped")
-        owner = state.get("active_worker")
+        owner = state.get("active_worker") or state.get("pending_worker")
         if owner and _owner_live(owner):
-            self.ledger.append("poll_skipped_active_worker", worker_id=owner.get("worker_id"))
+            self.ledger.append("poll_skipped_owned_worker", worker_id=owner.get("worker_id"), claimed=bool(state.get("active_worker")))
             return PollResult("busy")
         if owner:
-            state["active_worker"] = None
+            state["pending_worker"] = None
             state["mode"] = "IDLE"
             self.store.save(state)
-            self.ledger.append("stale_owner_cleared", worker_id=owner.get("worker_id"), pid=owner.get("pid"))
+            self.ledger.append("stale_pending_owner_cleared", worker_id=owner.get("worker_id"), pid=owner.get("pid"))
 
         ids = list(self.gmail.list_messages())
         state = self.store.load()
@@ -146,18 +115,18 @@ class Relay:
                 return PollResult("advanced", message_id)
             try:
                 staged = stage_instruction(self.config.local_project_storage, msg, env)
-                worker = self.launcher.launch(staged_path=staged, envelope=env, content_hash=content_hash)
+                worker = self.launcher.launch(staged_path=staged, envelope=env, content_hash=content_hash, message_id=message_id)
             except Exception as exc:
                 state["last_error"] = f"launch failed: {type(exc).__name__}"
                 self.store.save(state)
                 self.ledger.append("launch_failed", message_id=message_id, reason=type(exc).__name__)
                 return PollResult("launch_failed", message_id)
-            consumed.add(message_id)
-            state.update({"current_run": env.run_id, "expected_step": step + 1, "expected_parent": step, "mode": "BUSY", "active_worker": worker, "last_error": None})
-            state["consumed_message_ids"] = sorted(consumed)
-            state["logical_hashes"][logical_key] = content_hash
+            # Launch is only a pending ownership barrier. The Worker atomically
+            # acknowledges claim before this logical step is consumed.
+            worker.update({"message_id": message_id, "content_hash": content_hash, "staged_path": str(staged)})
+            state.update({"mode": "BUSY", "pending_worker": worker, "last_error": None})
             self.store.save(state)
-            self.ledger.append("worker_launched", message_id=message_id, step=step, worker_id=worker.get("worker_id"))
+            self.ledger.append("worker_launch_pending_claim", message_id=message_id, step=step, worker_id=worker.get("worker_id"))
             return PollResult("launched", message_id, staged, worker)
         self.ledger.append("poll_complete", fetched=len(ids))
         return PollResult("idle")
@@ -170,7 +139,7 @@ class NoopWorkerLauncher:
         self.pid = os.getpid() if pid is None else pid
         self.calls: list[dict] = []
 
-    def launch(self, *, staged_path: Path, envelope: ProtocolEnvelope, content_hash: str) -> dict:
-        owner = {"worker_id": str(uuid4()), "pid": self.pid, "project_id": envelope.project_id, "run_id": envelope.run_id, "step": envelope.step, "started_at": now(), "exe": Path(os.sys.executable).name}
-        self.calls.append({"staged_path": staged_path, "envelope": envelope, "content_hash": content_hash, "owner": owner})
+    def launch(self, *, staged_path: Path, envelope: ProtocolEnvelope, content_hash: str, message_id: str) -> dict:
+        owner = {"worker_id": str(uuid4()), "pid": self.pid, "project_id": envelope.project_id, "run_id": envelope.run_id, "step": envelope.step, "parent": envelope.parent, "started_at": now(), "exe": Path(os.sys.executable).name}
+        self.calls.append({"staged_path": staged_path, "envelope": envelope, "content_hash": content_hash, "message_id": message_id, "owner": owner})
         return owner

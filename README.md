@@ -11,7 +11,7 @@ Python Gmail poll-once
 
 “AI 永不等待，软件等待”。`poll-once` 只执行一个 Gmail fetch cycle，不 sleep、不循环、不通过 Codex Gmail integration 读取邮件。已有活动的精确 Worker owner 会使本次调用无操作；旧步骤忽略，未来有效步骤暂缓且不消费，同一 logical step 的不同哈希 fail closed。`NO_ACTION` 只推进协议序号，`WAKE` 才暂存并启动 Worker，`HUMAN_REQUIRED` 不启动 Worker。
 
-持久化只有 `IDLE`、`BUSY`、`STOPPED` 三种模式，以及 run/expected step/parent、已消费 Gmail ID、logical hash、停止标记和精确 active-worker owner。状态 JSON 原子替换，账本为追加 JSONL；inbox 暂存先写临时目录再原子发布。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\gmail-courier`，不进入 Git。
+持久化只有 `IDLE`、`BUSY`、`STOPPED` 三种模式，以及 run/expected step/parent、已消费 Gmail ID、logical hash、停止标记和精确 pending/active-worker owner。进程启动先记录 pending owner；Worker 精确认领并原子确认后才消费 Gmail ID、推进 expected step。Worker 在认领前死亡时，下一次 `poll-once` 清理 pending owner 并重试，步骤不会丢失。状态 JSON 原子替换，账本为追加 JSONL；inbox 暂存先写临时目录再原子发布。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\gmail-courier`，不进入 Git。
 
 ## 命令
 
@@ -23,18 +23,19 @@ agent-relay status
 agent-relay stop
 ```
 
-`test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。Worker 使用配置的 Codex 命令执行单个暂存任务，完成后写固定格式 handoff 报告并启动一次 detached watchdog。Watchdog 用 `project + RUN + AFTER_STEP` 精确锁去重，最多等待/调用两次 `poll-once`，绝不打断活动 Worker、递归唤醒或常驻运行。
+`test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。Worker 使用配置的 Codex 命令执行单个暂存任务，生成 `AGENTRELAY_CHATGPT_HANDOFF/1` 后通过 `handoff_command` 调用一次性固定 URL sender；sender 必须在 stdout 给出 `SUBMITTED`，否则不写成功证据、不启动 watchdog。成功后才写本地审计副本并启动一次 detached watchdog。Watchdog 用 `project + RUN + AFTER_STEP` 精确锁去重，最多等待/调用两次 `poll-once`，绝不打断活动 Worker、递归唤醒或常驻运行。
 
 ## 安全边界
 
 新协议仍严格要求 `AGENTRELAY/1`、`CHANNEL`、`RUN`、`STEP`、`PARENT`、`DISPOSITION`、`PROJECT`。只接受配置的项目和稳定频道 `AR-GMAILCOURIER-A1R7P`。OAuth/token、inbox、state、logs 和 handoff 运行时目录均被忽略；日志不写入凭据。
 
-本阶段删除了持久化 Runner、Supervisor 状态机、后台轮询线程、DRAINING/transport reconciliation、长寿命 App Server/醒门恢复层。保留的 Gmail gateway、协议解析、确定性暂存、哈希验证、原子状态和账本是唯一 Gmail 读取路径。真实 Codex thread/wake、Chrome/ChatGPT 交接的扩展点仍由固定 handoff 报告承载，不在本阶段引入常驻服务。
+本阶段删除了持久化 Runner、Supervisor 状态机、后台轮询线程、DRAINING/transport reconciliation、长寿命 App Server/醒门恢复层。保留的 Gmail gateway、协议解析、确定性暂存、哈希验证、原子状态和账本是唯一 Gmail 读取路径。ChatGPT 交接通过配置的固定 URL 一次性 sender 完成，不引入常驻服务。
 
 ## 验证
 
 ```powershell
 python -m compileall -q agent_relay gmail_courier
+python tools/certify_minimal_closure.py
 python tests/test_minimal_relay.py
 python -m pytest tests/test_minimal_relay.py tests/test_courier.py
 ```

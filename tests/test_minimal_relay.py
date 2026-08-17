@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 
 from agent_relay.config import RelayConfig
+from agent_relay.config import EXPECTED_CHAT_URL
 from agent_relay.gmail import Attachment, GmailMessage
 from agent_relay.relay import NoopWorkerLauncher, Relay
 from agent_relay.storage import StateStore, stage_instruction
@@ -32,11 +33,20 @@ class FakeGmail:
         return self.messages[message_id]
 
 
+class RecordingSender:
+    def __init__(self, ok=True):
+        self.ok = ok; self.calls = []
+    def submit(self, report):
+        from agent_relay.handoff import HandoffSubmission
+        self.calls.append(report)
+        return HandoffSubmission(self.ok, "SUBMITTED" if self.ok else "rejected", verified=self.ok)
+
+
 class MinimalRelayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.cfg = RelayConfig("gmail-courier", "Gmail Courier", "AR-GMAILCOURIER-A1R7P", root, root / "storage", "mock", "", "mock", "", 20, True, root)
+        self.cfg = RelayConfig("gmail-courier", "Gmail Courier", "AR-GMAILCOURIER-A1R7P", root, root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
     def tearDown(self):
         self.tmp.cleanup()
     def msg(self, mid="m1", step=1, parent=0, disposition="WAKE", attachments=()):
@@ -77,9 +87,9 @@ class MinimalRelayTests(unittest.TestCase):
     def test_stop_prevents_poll(self):
         s = StateStore(self.cfg.local_project_storage); st = s.load(); st.update({"stop_requested": True, "mode": "STOPPED"}); s.save(st); r = self.relay([self.msg()]); self.assertEqual(r.poll_once().action, "stopped"); self.assertEqual(r.gmail.list_calls, 0)
     def test_worker_claim_and_exit(self):
-        staged = stage_instruction(self.cfg.local_project_storage, self.msg(), __import__("agent_relay.protocol", fromlist=["parse_envelope"]).parse_envelope(self.msg().body)); worker = OneShotWorker(self.cfg, executor=lambda text, path: WorkerOutcome(True, "ok")); self.assertTrue(worker.run(run_id="RUN-TEST-001", step=1, staged_path=staged).ok); self.assertEqual(StateStore(self.cfg.local_project_storage).load()["mode"], "IDLE")
+        staged = stage_instruction(self.cfg.local_project_storage, self.msg(), __import__("agent_relay.protocol", fromlist=["parse_envelope"]).parse_envelope(self.msg().body)); worker = OneShotWorker(self.cfg, executor=lambda text, path: WorkerOutcome(True, "ok"), handoff_sender=RecordingSender()); self.assertTrue(worker.run(run_id="RUN-TEST-001", step=1, staged_path=staged).ok); self.assertEqual(StateStore(self.cfg.local_project_storage).load()["mode"], "IDLE")
     def test_worker_failure_still_exits(self):
-        staged = stage_instruction(self.cfg.local_project_storage, self.msg(), __import__("agent_relay.protocol", fromlist=["parse_envelope"]).parse_envelope(self.msg().body)); worker = OneShotWorker(self.cfg, executor=lambda text, path: WorkerOutcome(False, "failed")); self.assertFalse(worker.run(run_id="RUN-TEST-001", step=1, staged_path=staged).ok); self.assertIsNone(StateStore(self.cfg.local_project_storage).load()["active_worker"])
+        staged = stage_instruction(self.cfg.local_project_storage, self.msg(), __import__("agent_relay.protocol", fromlist=["parse_envelope"]).parse_envelope(self.msg().body)); worker = OneShotWorker(self.cfg, executor=lambda text, path: WorkerOutcome(False, "failed"), handoff_sender=RecordingSender()); self.assertFalse(worker.run(run_id="RUN-TEST-001", step=1, staged_path=staged).ok); self.assertIsNone(StateStore(self.cfg.local_project_storage).load()["active_worker"])
     def test_watchdog_dedupes(self):
         sleeps = []; factory = lambda: self.relay([]); result = run_watchdog(self.cfg, run_id="RUN-TEST-001", after_step=1, poll_factory=factory, sleep=lambda n: sleeps.append(n)); self.assertEqual(result, "exhausted"); self.assertEqual(sleeps, [120, 120]); self.assertEqual(run_watchdog(self.cfg, run_id="RUN-TEST-001", after_step=1, poll_factory=factory, sleep=lambda n: None), "deduped")
     def test_watchdog_stops(self):
