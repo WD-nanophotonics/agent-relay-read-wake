@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from dataclasses import replace
 import sys
+from types import SimpleNamespace
 
 from agent_relay.config import EXPECTED_CHAT_URL, RelayConfig
 from agent_relay.gmail import GmailMessage
@@ -15,6 +16,7 @@ from agent_relay.relay import Relay, poll_transaction_lock
 from agent_relay.storage import StateStore, stage_instruction
 from agent_relay.watchdog import run_watchdog
 from agent_relay.worker import OneShotWorker, WorkerOutcome
+import agent_relay.worker as worker_module
 
 
 def body(step=1):
@@ -45,6 +47,21 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp); cfg = RelayConfig("gmail-courier", "Gmail", "AR-GMAILCOURIER-A1R7P", Path.cwd(), root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
         msg = GmailMessage("m1", "t", None, body(), ())
+        staged_probe = root / "staged-probe"; staged_probe.mkdir(parents=True); (staged_probe / "message.txt").write_text("AUTHORITATIVE " + ("x" * 200000), encoding="utf-8")
+        captured = {}
+        original_run = worker_module.subprocess.run
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="bounded", stderr="")
+        worker_module.subprocess.run = fake_run
+        try:
+            bounded = OneShotWorker(cfg)._subprocess_executor(staged_probe, cfg.repo_path)
+        finally:
+            worker_module.subprocess.run = original_run
+        assert bounded.ok and captured["argv"][-1] == "-" and str(staged_probe.resolve()) not in " ".join(map(str, captured["argv"])) and len(" ".join(map(str, captured["argv"]))) < 2000 and "AUTHORITATIVE" not in " ".join(map(str, captured["argv"]))
+        assert str(staged_probe.resolve()) in captured.get("input", "") and len(captured["input"]) < 1000 and "AUTHORITATIVE" not in captured["input"]
+        print("STAGED_INSTRUCTION_ARGV_BOUNDED_PASS")
         helper = root / "bounded_sender.py"; helper.write_text("import sys; sys.stdin.read(); print('SUBMITTED')", encoding="utf-8")
         real_cfg = replace(cfg, handoff_command=f'"{sys.executable}" "{helper}"'); real_submission = CommandHandoffSender(real_cfg).submit("AGENTRELAY_CHATGPT_HANDOFF/1")
         assert real_submission.ok and real_submission.verified and real_submission.attempts == 1; print("REAL_CHATGPT_SENDER_INVOCATION_PASS")

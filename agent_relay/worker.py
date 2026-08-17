@@ -23,10 +23,11 @@ class WorkerOutcome:
 class OneShotWorker:
     """Own exactly one staged task and terminate after one bounded execution."""
 
-    def __init__(self, config, *, executor: Callable[[str, Path], WorkerOutcome] | None = None, handoff_sender=None, watchdog_spawn: Callable[[int, str], object] | None = None):
+    def __init__(self, config, *, executor: Callable[[str | Path, Path], WorkerOutcome] | None = None, handoff_sender=None, watchdog_spawn: Callable[[int, str], object] | None = None):
         self.config = config
         self.store = StateStore(config.local_project_storage)
         self.ledger = Ledger(config.local_project_storage)
+        self._uses_default_executor = executor is None
         self.executor = executor or self._subprocess_executor
         self.handoff_sender = handoff_sender or CommandHandoffSender(config)
         self.watchdog_spawn = watchdog_spawn
@@ -73,7 +74,11 @@ class OneShotWorker:
         try:
             baseline_sha = self._git_value("rev-parse", "HEAD")
             instruction = (staged_path / "message.txt").read_text(encoding="utf-8")
-            outcome = self.executor(instruction, self.config.repo_path)
+            # Test/in-process executors retain the historical text contract.  The
+            # production Codex executor receives only the staged directory so the
+            # authoritative instruction never expands the worker argv.
+            executor_input = staged_path if self._uses_default_executor else instruction
+            outcome = self.executor(executor_input, self.config.repo_path)
             if not outcome.ok:
                 raise RuntimeError(outcome.detail)
             self._write_handoff(run_id, step, owner, outcome.detail, baseline_sha=baseline_sha)
@@ -103,14 +108,26 @@ class OneShotWorker:
                 self.store.save(state)
                 self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
 
-    def _subprocess_executor(self, instruction: str, repo_path: Path) -> WorkerOutcome:
+    def _subprocess_executor(self, staged_path: str | Path, repo_path: Path) -> WorkerOutcome:
         command = getattr(self.config, "codex_command", "codex.cmd")
-        prompt = instruction + "\n\nBounded worker contract: complete this task, run the requested checks, commit and push, verify HEAD equals origin/main, then return a concise report. Do not wait for Gmail or ChatGPT."
+        staged_path = Path(staged_path).resolve()
+        if not (staged_path / "message.txt").is_file():
+            return WorkerOutcome(False, f"staged instruction missing: {staged_path}")
+        # Keep argv bounded and deterministic.  Codex supports ``-`` as a
+        # stdin prompt, so the staged file is the sole authority and this
+        # bootstrap intentionally contains no copy of its body.
+        prompt = (
+            "Read the authoritative staged instruction at "
+            f"{staged_path}. Treat that file as the sole task authority. "
+            "Complete it, run its requested checks, commit and push, verify "
+            "HEAD equals origin/main, then return a concise report. Do not "
+            "wait for Gmail or ChatGPT."
+        )
         try:
             # Codex exposes these as mutually-exclusive approval modes.  Use the
             # bounded non-interactive approval flag alone; it grants the worker's
             # workspace scope without producing an invalid invocation.
-            result = subprocess.run([command, "exec", "--approve-for-me", prompt], cwd=repo_path, text=True, capture_output=True, timeout=3600, check=False)
+            result = subprocess.run([command, "exec", "--approve-for-me", "-"], input=prompt, cwd=repo_path, text=True, capture_output=True, timeout=3600, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return WorkerOutcome(False, type(exc).__name__)
         detail = (result.stdout or result.stderr or "").strip()[-4000:]
