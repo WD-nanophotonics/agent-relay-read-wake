@@ -42,6 +42,13 @@ Both real roles are launched with explicit `gpt-5.6-luna` and
 arguments in its durable event and metadata files; workstation Codex defaults
 are never treated as model-selection evidence.
 
+Each run also has a reconstructable `manifest.json` and `runtime-state.json`.
+The compact `events.jsonl` journal records normal transitions, while
+`trace/process.jsonl` records process/file/hash lineage and `incidents/` holds
+objective abnormal-run bundles. A bounded `--role RECOVER` entrypoint rebuilds
+the next safe A/B boundary from those files without prompt-history inheritance
+or duplicate ownership.
+
 ## 验证
 
 ```powershell
