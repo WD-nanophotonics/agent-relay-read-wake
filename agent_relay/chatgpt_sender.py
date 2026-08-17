@@ -95,7 +95,11 @@ class BrowserChatGPTSender:
                     raise RuntimeError("fixed ChatGPT composer is not enabled")
                 composer.fill(report)
                 composer.press("Enter")
-                marker = "AGENTRELAY_CHATGPT_HANDOFF/1"
+                # A generic protocol marker can already exist in the thread and
+                # would produce a false positive. Require this submission's
+                # unique handoff token to become visible after pressing Enter.
+                token = next((line.split(":", 1)[1].strip() for line in report.splitlines() if line.startswith("HANDOFF_TOKEN:")), "")
+                marker = f"HANDOFF_TOKEN: {token}" if token else "AGENTRELAY_CHATGPT_HANDOFF/1"
                 deadline = time.monotonic() + self.timeout
                 while time.monotonic() < deadline:
                     # The submitted user turn is visible in the real conversation;
