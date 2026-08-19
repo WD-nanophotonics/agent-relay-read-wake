@@ -485,7 +485,7 @@ def chat_test(args) -> int:
         f"The JSON must be valid UTF-8 JSON and must contain \"project_id\": \"{project_code}\", \"task_id\": \"{task_id}\", \"keyword\": \"{keyword}\", and \"correlation_id\": \"{args.correlation_id}\".",
         "The JSON may include an English instruction for the receiving Agent.",
     ]
-    contract_lines.extend(["Do not send any other Gmail for this request.", "--- END GMAIL RESPONSE CONTRACT ---"])
+    contract_lines.extend(["You may make at most one additional send attempt if the first Gmail send fails; preserve the required identifiers and attachment.", "--- END GMAIL RESPONSE CONTRACT ---"])
     contract = "\n".join(contract_lines)
 
     class Config:

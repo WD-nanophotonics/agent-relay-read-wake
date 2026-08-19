@@ -295,6 +295,7 @@ class WorkflowStageTests(unittest.TestCase):
         self.assertTrue(FakeSender.stop_seen)
         self.assertIn("ChatGPT is the higher-authority workflow manager and outranks the local Agent", FakeSender.submitted_message)
         self.assertIn("Use ASCII English only in the ChatGPT reply and response Gmail", FakeSender.submitted_message)
+        self.assertIn("If your first Gmail send attempt fails, you may revise the Gmail body and make one additional send attempt", FakeSender.submitted_message)
         quoted = FakeSender.submitted_message.split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split("\n--- END QUOTED LOCAL AGENT REQUEST ---", 1)[0]
         self.assertEqual(quoted, factual)
         self.assertIn("--- COURIER GENERATED RESPONSE CONTRACT ---", FakeSender.submitted_message)
