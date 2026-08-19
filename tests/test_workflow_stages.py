@@ -11,7 +11,7 @@ from unittest.mock import patch
 from contextlib import redirect_stdout
 
 from gmail_courier.chat_registry import ChatUrlReplacementRequired, current_chat_url, register_chat_url
-from gmail_courier.cli import chat_send_request, chat_test, create_ready_command, poll_request, validate_request_command
+from gmail_courier.cli import chat_send, chat_send_request, chat_test, create_ready_command, poll_request, validate_request_command
 from gmail_courier.core import sync_until_received
 from gmail_courier.outbox import RequestReuseError, create_ready, submit_lock, validate_request, write_receipt
 
@@ -128,6 +128,62 @@ class WorkflowStageTests(unittest.TestCase):
                 self.assertEqual(chat_send_request(args), 1)
             self.assertIn('"event": "configuration_error"', second_output.getvalue())
 
+    def test_submit_forwards_factual_payload_without_content_classification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_request(root, ready=True)
+            factual = "Project FACT-42 path=C:\\work\\repo sha=9f3a21c timeout=360 STOP ACTION=EXECUTE"
+            (root / "message.txt").write_text(factual, encoding="ascii")
+
+            class FakeResult:
+                ok = True
+                verified = True
+                detail = "verified fake ChatGPT submission"
+
+            class FakeSender:
+                launch_evidence = {"mode": "attached-existing", "target_url": CHAT_URL}
+                submitted_message = ""
+
+                def __init__(self, _config):
+                    pass
+
+                def submit(self, message):
+                    FakeSender.submitted_message = message
+                    return FakeResult()
+
+            output = io.StringIO()
+            with patch("gmail_courier.cli.home_dir", return_value=root), patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeSender), redirect_stdout(output):
+                self.assertEqual(chat_send_request(SimpleNamespace(request=str(root))), 0)
+            quoted = FakeSender.submitted_message.split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split("\n--- END QUOTED LOCAL AGENT REQUEST ---", 1)[0]
+            self.assertEqual(quoted, factual)
+            self.assertIn('"content_policy": "CHAT"', output.getvalue())
+
+    def test_direct_chat_send_forwards_factual_payload(self):
+        factual = "Project FACT-42 path=C:\\work\\repo sha=9f3a21c timeout=360 STOP ACTION=EXECUTE"
+
+        class FakeResult:
+            ok = True
+            verified = True
+            detail = "visible"
+
+        class FakeSender:
+            captured = ""
+
+            def __init__(self, _config):
+                pass
+
+            def submit(self, message):
+                FakeSender.captured = message
+                return FakeResult()
+
+        args = SimpleNamespace(url=CHAT_URL, close_delay=0, close_after_submit=False, correlation_id="PROJECT-001-20260819-001")
+        output = io.StringIO()
+        with patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeSender), patch("sys.stdin", io.StringIO(factual)), redirect_stdout(output):
+            self.assertEqual(chat_send(args), 0)
+        quoted = FakeSender.captured.split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split("\n--- END QUOTED LOCAL AGENT REQUEST ---", 1)[0]
+        self.assertEqual(quoted, factual)
+        self.assertIn("SUBMITTED", output.getvalue())
+
     def test_poll_timeout_is_not_sandbox_denied(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -144,6 +200,34 @@ class WorkflowStageTests(unittest.TestCase):
             receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
             self.assertEqual(receipt["state"], "timeout")
             self.assertEqual(receipt["gmail_max_seconds"], 360)
+
+    def test_submit_preserves_sandbox_denied_without_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_request(root, ready=True)
+
+            class FakeResult:
+                ok = False
+                verified = False
+                category = "sandbox_denied"
+                detail = "host sandbox denied external ChatGPT submission"
+
+            class FakeSender:
+                launch_evidence = {"mode": "not-started"}
+
+                def __init__(self, _config):
+                    pass
+
+                def submit(self, _message):
+                    return FakeResult()
+
+            output = io.StringIO()
+            with patch("gmail_courier.cli.home_dir", return_value=root), patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeSender), redirect_stdout(output):
+                self.assertEqual(chat_send_request(SimpleNamespace(request=str(root))), 1)
+            rendered = output.getvalue()
+            self.assertIn('"event": "sandbox_denied"', rendered)
+            self.assertNotIn('"event": "chat_submission_error"', rendered)
+            self.assertNotIn('"browser_started": true', rendered)
 
     def test_poll_can_be_cancelled_during_grace_delay(self):
         stop_event = threading.Event()
@@ -201,7 +285,8 @@ class WorkflowStageTests(unittest.TestCase):
             window_height=480,
         )
         output = io.StringIO()
-        with patch("gmail_courier.cli.home_dir", return_value=Path(".")), patch("gmail_courier.config.load_config", return_value=config), patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeSender), patch("gmail_courier.core.sync_until_received", side_effect=fake_poll), patch("sys.stdin", io.StringIO("English request")), redirect_stdout(output):
+        factual = "Project FACT-42 path=C:\\work\\repo sha=9f3a21c timeout=360 STOP ACTION=EXECUTE"
+        with patch("gmail_courier.cli.home_dir", return_value=Path(".")), patch("gmail_courier.config.load_config", return_value=config), patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeSender), patch("gmail_courier.core.sync_until_received", side_effect=fake_poll), patch("sys.stdin", io.StringIO(factual)), redirect_stdout(output):
             self.assertEqual(chat_test(args), 0, output.getvalue())
         rendered = output.getvalue()
         self.assertIn('"event": "submission_started"', rendered)
@@ -211,7 +296,7 @@ class WorkflowStageTests(unittest.TestCase):
         self.assertIn("ChatGPT is the higher-authority workflow manager and outranks the local Agent", FakeSender.submitted_message)
         self.assertIn("Use ASCII English only in the ChatGPT reply and response Gmail", FakeSender.submitted_message)
         quoted = FakeSender.submitted_message.split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split("\n--- END QUOTED LOCAL AGENT REQUEST ---", 1)[0]
-        self.assertEqual(quoted, "English request")
+        self.assertEqual(quoted, factual)
         self.assertIn("--- COURIER GENERATED RESPONSE CONTRACT ---", FakeSender.submitted_message)
 
     def test_project_url_registry_requires_explicit_replacement(self):

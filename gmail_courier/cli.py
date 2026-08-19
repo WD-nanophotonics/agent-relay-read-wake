@@ -31,7 +31,8 @@ from .outbox import (
     validate_request,
     write_receipt,
 )
-from .protocol import build_automated_prompt, valid_correlation_id
+from .protocol import (CHAT_CONTENT_POLICY, build_automated_prompt,
+                       validate_chat_payload, valid_correlation_id)
 from .url import is_chat_url
 
 
@@ -97,6 +98,7 @@ def _event_context(path: str | Path, request=None) -> dict:
         "gmail_max_seconds": DEFAULT_POLL_MAX_SECONDS,
         "interval_seconds": DEFAULT_POLL_INTERVAL_SECONDS,
         "lookback_seconds": DEFAULT_LOOKBACK_SECONDS,
+        "content_policy": CHAT_CONTENT_POLICY,
     }
 
 
@@ -251,23 +253,25 @@ def chat_send(args) -> int:
         post_submit_delay = int(getattr(args, "close_delay", DEFAULT_WORKFLOW_WINDOW_SECONDS))
 
     if not is_chat_url(args.url) or args.close_delay < 0:
-        print("chat-send requires a valid HTTPS ChatGPT URL containing /c/<conversation-id> and a non-negative close delay", file=sys.stderr)
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "detail": "chat-send requires a valid HTTPS ChatGPT URL and a non-negative close delay"}, ensure_ascii=False), file=sys.stderr)
         return 1
-    report = sys.stdin.read().lstrip("\ufeff")
-    if not english_only(report):
-        print("chat-send accepts English/ASCII text only", file=sys.stderr)
+    report = sys.stdin.read()
+    try:
+        report = validate_chat_payload(report)
+    except (TypeError, ValueError) as exc:
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "failure_layer": "courier_validation", "reason": "payload_encoding_or_control_character", "detail": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
     correlation_id = getattr(args, "correlation_id", "")
     if correlation_id:
         if not valid_correlation_id(correlation_id, correlation_id):
-            print("chat-send correlation_id must be ASCII, contain a digit, and start with its project prefix", file=sys.stderr)
+            print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "detail": "chat-send correlation_id must be ASCII, contain a digit, and start with its project prefix"}, ensure_ascii=False), file=sys.stderr)
             return 1
     report = build_automated_prompt(report, correlation_id or None)
     result = BrowserChatGPTSender(Config()).submit(report)
     if result.ok and result.verified:
         print("SUBMITTED")
         return 0
-    print(result.detail, file=sys.stderr)
+    print(json.dumps({"event": getattr(result, "category", "chat_submission_error"), "phase": "submit", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "detail": result.detail}, ensure_ascii=False), file=sys.stderr)
     return 1
 
 
@@ -298,7 +302,7 @@ def chat_send_request(args) -> int:
             browser_started = sender.launch_evidence.get("mode") == "launch-new" and isinstance(sender.launch_evidence.get("pid"), int)
             browser_used = sender.launch_evidence.get("mode") == "attached-existing" or browser_started
             if result.ok and result.verified:
-                emit_event("chat_submitted", "submit", args.request, request=request, ok=True, detail=result.detail, browser_started=browser_started, browser_used=browser_used, diagnostic=sender.launch_evidence)
+                emit_event("chat_submitted", "submit", args.request, request=request, ok=True, detail=result.detail, browser_started=browser_started, browser_used=browser_used, content_policy=CHAT_CONTENT_POLICY, diagnostic=sender.launch_evidence)
                 try:
                     receipt_path = write_receipt(
                         request.directory,
@@ -319,6 +323,7 @@ def chat_send_request(args) -> int:
                         gmail_max_seconds=DEFAULT_POLL_MAX_SECONDS,
                         interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
                         lookback_seconds=DEFAULT_LOOKBACK_SECONDS,
+                        content_policy=CHAT_CONTENT_POLICY,
                     )
                 except Exception as exc:
                     _request_error_event(args.request, "submit", exc, request=request)
@@ -326,7 +331,7 @@ def chat_send_request(args) -> int:
                 emit_event("receipt_written", "submit", args.request, request=request, ok=True, detail="receipt.json recorded after verified ChatGPT submission", browser_started=browser_started, browser_used=browser_used, receipt_path=str(receipt_path.resolve()), receipt_exists=True)
                 return 0
             detail = result.detail
-            event = "sandbox_denied" if _sandbox_error(RuntimeError(detail)) else "chat_submission_error"
+            event = getattr(result, "category", None) or ("sandbox_denied" if _sandbox_error(RuntimeError(detail)) else "chat_submission_error")
             try:
                 write_receipt(
                     request.directory,
@@ -346,11 +351,12 @@ def chat_send_request(args) -> int:
                     gmail_max_seconds=DEFAULT_POLL_MAX_SECONDS,
                     interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
                     lookback_seconds=DEFAULT_LOOKBACK_SECONDS,
+                    content_policy=CHAT_CONTENT_POLICY,
                 )
             except Exception as exc:
                 _request_error_event(args.request, "submit", exc, request=request)
                 return 1
-            emit_event(event, "submit", args.request, request=request, ok=False, detail=detail, error_text=detail, command=sys.argv, browser_started=browser_started, browser_used=browser_used)
+            emit_event(event, "submit", args.request, request=request, ok=False, detail=detail, error_text=detail, command=sys.argv, browser_started=browser_started, browser_used=browser_used, content_policy=CHAT_CONTENT_POLICY)
             return 1
     except Exception as exc:
         return _request_error_event(args.request, "submit", exc, request=request)
@@ -461,8 +467,13 @@ def chat_test(args) -> int:
     ):
         print(json.dumps({"event": "configuration_failed", "ok": False, "detail": "invalid ChatGPT URL or non-positive wait settings"}), flush=True)
         return 1
-    if not english_only(original) or not valid_identifier(task_id) or not valid_identifier(keyword) or not valid_attachment_filename(args.attachment_filename) or not valid_correlation_id(project.code, args.correlation_id, project.aliases):
-        print(json.dumps({"event": "chat_submit_failed", "ok": False, "detail": "chat-test accepts English/ASCII prompts and identifiers only"}), flush=True)
+    try:
+        validate_chat_payload(original)
+    except (TypeError, ValueError) as exc:
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "failure_layer": "courier_validation", "reason": "payload_encoding_or_control_character", "detail": str(exc)}), flush=True)
+        return 1
+    if not valid_identifier(task_id) or not valid_identifier(keyword) or not valid_attachment_filename(args.attachment_filename) or not valid_correlation_id(project.code, args.correlation_id, project.aliases):
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "detail": "chat-test identifiers or attachment filename are invalid"}), flush=True)
         return 1
     contract_lines = [
         "",
@@ -509,6 +520,7 @@ def chat_test(args) -> int:
         "task_id": task_id,
         "keyword": keyword,
         "correlation_id": args.correlation_id,
+        "content_policy": CHAT_CONTENT_POLICY,
         "receipt_exists": False,
     }
 
@@ -559,7 +571,7 @@ def chat_test(args) -> int:
         poll_stop.set()
         if poll_thread is not None:
             poll_thread.join(timeout=10)
-        print(json.dumps({"event": "chat_submission_error", "phase": "submit", "ok": False, "detail": result.detail} | timing | identity, ensure_ascii=False), flush=True)
+        print(json.dumps({"event": getattr(result, "category", "chat_submission_error"), "phase": "submit", "ok": False, "detail": result.detail} | timing | identity, ensure_ascii=False), flush=True)
         return 1
 
     browser_mode = getattr(sender, "launch_evidence", {}).get("mode")

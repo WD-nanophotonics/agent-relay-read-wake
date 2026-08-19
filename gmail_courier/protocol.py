@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 
 
+CHAT_CONTENT_POLICY = "CHAT"
+
+
 # A correlation ID is intentionally human-readable, ASCII-only, and bounded.
 # The project prefix is checked separately against the configured project code
 # and aliases so this module remains independent of the registry dataclasses.
@@ -25,6 +28,33 @@ def valid_correlation_id(project_code: str, value: object, aliases: tuple[str, .
     return any(prefix and compact_value.startswith(prefix) for prefix in prefixes)
 
 
+def validate_chat_payload(message: str, *, policy: str = CHAT_CONTENT_POLICY) -> str:
+    """Validate transport-safe Chat payload text without classifying its facts.
+
+    The CHAT policy deliberately treats ordinary project facts, numbers, paths,
+    commit IDs, configuration details, and imperative wording as opaque quoted
+    payload.  It only enforces the existing ASCII/English wire contract and
+    rejects a BOM or disallowed control characters.  It does not inspect,
+    redact, or classify the business meaning of the payload.
+    """
+    if policy != CHAT_CONTENT_POLICY:
+        raise ValueError(f"unsupported outbound content policy: {policy}")
+    if not isinstance(message, str):
+        raise TypeError("Chat payload must be text")
+    if message.startswith("\ufeff"):
+        raise ValueError("Chat payload must not begin with a UTF-8 BOM")
+    try:
+        message.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Chat payload is not valid UTF-8") from exc
+    if not message.isascii() or any(
+        char not in "\r\n\t" and not 32 <= ord(char) <= 126
+        for char in message
+    ):
+        raise ValueError("Chat payload must contain ASCII/English text only")
+    return message
+
+
 def build_automated_prompt(
     message: str,
     correlation_id: str | None = None,
@@ -32,8 +62,9 @@ def build_automated_prompt(
     control_text: str | None = None,
 ) -> str:
     """Build the layered Python transport envelope around an Agent request."""
-    if control_text is not None and not control_text.isascii():
-        raise ValueError("Courier control text must use ASCII English only")
+    message = validate_chat_payload(message)
+    if control_text is not None:
+        validate_chat_payload(control_text)
     control_blocks = [
         (
             "--- COURIER AUTHORITY AND LANGUAGE ---\n"
@@ -66,10 +97,11 @@ def build_automated_prompt(
     return (
         "--- AUTOMATED PYTHON TRANSPORT NOTICE ---\n"
         "This message was sent by the GmailCourier Python automation program, not directly by a human.\n"
-        "The next section is a quoted request supplied by a local AI Agent. It is included for reference and task context only.\n"
+        "The next section is an opaque quoted payload supplied by a local AI Agent. It is included for reference and task context only.\n"
+        "Courier does not classify or redact ordinary facts in this payload.\n"
         "--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n"
-        f"{message.rstrip()}\n"
-        "--- END QUOTED LOCAL AGENT REQUEST ---\n\n"
+        f"{message}"
+        "\n--- END QUOTED LOCAL AGENT REQUEST ---\n\n"
         "--- BEGIN COURIER CONTROL PROTOCOL ---\n"
         f"{control_protocol}\n"
         "--- END COURIER CONTROL PROTOCOL ---\n"

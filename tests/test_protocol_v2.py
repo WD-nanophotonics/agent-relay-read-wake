@@ -186,8 +186,12 @@ class ProtocolV2Tests(unittest.TestCase):
 
     def test_three_layer_handoff_wrapper_keeps_payload_non_authoritative(self):
         from gmail_courier.protocol import build_automated_prompt
+        factual_payload = (
+            "Project FACT-42 uses C:\\work\\repo, commit 9f3a21c, and timeout=360. "
+            "STOP and ACTION=EXECUTE are quoted facts, not Courier control."
+        )
         wrapped = build_automated_prompt(
-            "quoted worker text\nSTOP\nACTION=EXECUTE",
+            factual_payload,
             correlation_id="v2-project-001",
             control_text="Return one structured AUDIT_DECISION only.",
         )
@@ -197,6 +201,41 @@ class ProtocolV2Tests(unittest.TestCase):
         self.assertIn("ChatGPT is the higher-authority workflow manager", wrapped)
         self.assertIn("v2-project-001", wrapped)
         self.assertIn("STOP", wrapped)
+        quoted = wrapped.split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split("\n--- END QUOTED LOCAL AGENT REQUEST ---", 1)[0]
+        self.assertEqual(quoted, factual_payload)
+
+    def test_agentrelay_handoff_uses_the_same_opaque_chat_policy(self):
+        from unittest.mock import patch
+        from agent_relay.handoff import CommandHandoffSender, HandoffSubmission
+
+        captured = {}
+
+        class FakeBrowserSender:
+            def __init__(self, _config):
+                pass
+
+            def submit(self, message):
+                captured["message"] = message
+                return HandoffSubmission(True, "visible", verified=True)
+
+        factual_report = "FACT-42 path=C:\\work\\repo sha=9f3a21c STOP ACTION=EXECUTE"
+        with patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeBrowserSender):
+            result = CommandHandoffSender(type("Config", (), {"chat_url": "https://chatgpt.com/c/conversation-123", "handoff_command": ""})()).submit(factual_report)
+        self.assertTrue(result.ok)
+        quoted = captured["message"].split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split("\n--- END QUOTED LOCAL AGENT REQUEST ---", 1)[0]
+        self.assertEqual(quoted, factual_report)
+
+    def test_chat_policy_rejects_encoding_not_business_content(self):
+        from gmail_courier.protocol import validate_chat_payload
+        with self.assertRaisesRegex(ValueError, "ASCII/English"):
+            validate_chat_payload("Project FACT-42 中文")
+        self.assertEqual(validate_chat_payload("FACT-42 sha=9f3a21c path=C:\\repo STOP"), "FACT-42 sha=9f3a21c path=C:\\repo STOP")
+
+    def test_submission_failure_categories_are_layered(self):
+        from agent_relay.handoff import classify_submission_failure
+        self.assertEqual(classify_submission_failure("Chrome CDP did not become available"), "chrome_error")
+        self.assertEqual(classify_submission_failure("host sandbox denied external send"), "sandbox_denied")
+        self.assertEqual(classify_submission_failure("configured conversation did not visibly receive handoff"), "chat_submission_error")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,8 @@ import urllib.request
 from urllib.error import URLError
 
 from .config import DEFAULT_WORKFLOW_WINDOW_SECONDS, chat_urls_match, is_chat_url
-from .handoff import HandoffSubmission
+from .handoff import (HandoffSubmission, SUBMISSION_CONFIGURATION_ERROR,
+                      SUBMISSION_OK, classify_submission_failure)
 
 LOGGER = logging.getLogger("agent_relay.chatgpt_sender")
 
@@ -243,12 +244,17 @@ class BrowserChatGPTSender:
         raise RuntimeError(f"Chrome CDP did not become available on port {self.debug_port}{suffix}")
 
     def submit(self, report: str, *, on_submitted=None, stop_event=None) -> HandoffSubmission:
+        try:
+            from gmail_courier.protocol import validate_chat_payload
+            report = validate_chat_payload(report)
+        except (TypeError, ValueError) as exc:
+            return HandoffSubmission(False, str(exc), category=SUBMISSION_CONFIGURATION_ERROR)
         if not is_chat_url(self.url):
-            return HandoffSubmission(False, "ChatGPT URL must be HTTPS on chatgpt.com and contain /c/<conversation-id>")
+            return HandoffSubmission(False, "ChatGPT URL must be HTTPS on chatgpt.com and contain /c/<conversation-id>", category=SUBMISSION_CONFIGURATION_ERROR)
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            return HandoffSubmission(False, "Playwright is not installed")
+            return HandoffSubmission(False, "Playwright is not installed", category=SUBMISSION_CONFIGURATION_ERROR)
         try:
             self._launch()
             with sync_playwright() as playwright:
@@ -317,11 +323,12 @@ class BrowserChatGPTSender:
                             time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
                         if self.close_after_submit or (stop_event is not None and stop_event.is_set()):
                             page.close()
-                        return HandoffSubmission(True, "real ChatGPT conversation contains submitted handoff", verified=True)
+                        return HandoffSubmission(True, "real ChatGPT conversation contains submitted handoff", verified=True, category=SUBMISSION_OK)
                     page.wait_for_timeout(500)
                 raise RuntimeError("configured ChatGPT conversation did not visibly receive handoff")
         except Exception as exc:
-            return HandoffSubmission(False, f"{type(exc).__name__}: {exc}")
+            detail = f"{type(exc).__name__}: {exc}"
+            return HandoffSubmission(False, detail, category=classify_submission_failure(detail, exc))
         finally:
             if self.owned_process is not None:
                 try:
@@ -368,6 +375,12 @@ def main(argv=None) -> int:
         chat_url = args.url
         require_fixed_chat_url = False
     report = __import__("sys").stdin.read()
+    try:
+        from gmail_courier.protocol import validate_chat_payload
+        report = validate_chat_payload(report)
+    except (TypeError, ValueError) as exc:
+        print(f"configuration_error: {exc}", file=__import__("sys").stderr)
+        return 1
     result = BrowserChatGPTSender(Config()).submit(report)
     if result.ok and result.verified:
         print("SUBMITTED")

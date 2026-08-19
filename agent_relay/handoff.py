@@ -25,13 +25,36 @@ AUDITOR_RESPONSE_CONTRACT = (
     "Use ASCII English in the control fields and return for a new audit after the authorized work order."
 )
 
+SUBMISSION_OK = "chat_submitted"
+SUBMISSION_CONFIGURATION_ERROR = "configuration_error"
+SUBMISSION_SANDBOX_DENIED = "sandbox_denied"
+SUBMISSION_CHAT_ERROR = "chat_submission_error"
+SUBMISSION_CHROME_ERROR = "chrome_error"
+SUBMISSION_NETWORK_ERROR = "network_error"
+SUBMISSION_COURIER_ERROR = "courier_error"
+
+
+def classify_submission_failure(detail: str, exc: BaseException | None = None) -> str:
+    """Classify a failed Chat submission without pretending to bypass a host gate."""
+    text = f"{type(exc).__name__ if exc else ''} {detail}".lower()
+    if isinstance(exc, PermissionError) or any(item in text for item in ("sandbox", "access is denied", "operation not permitted")):
+        return SUBMISSION_SANDBOX_DENIED
+    if any(item in text for item in ("chatgpt url", "playwright is not installed", "payload must", "configuration")):
+        return SUBMISSION_CONFIGURATION_ERROR
+    if any(item in text for item in ("cdp", "chrome", "profile lock")):
+        return SUBMISSION_CHROME_ERROR
+    if any(item in text for item in ("urlerror", "connection", "network", "timed out", "timeout")):
+        return SUBMISSION_NETWORK_ERROR
+    return SUBMISSION_CHAT_ERROR
+
 
 class HandoffSubmission:
-    def __init__(self, ok: bool, detail: str, *, attempts: int = 1, verified: bool = False):
+    def __init__(self, ok: bool, detail: str, *, attempts: int = 1, verified: bool = False, category: str | None = None):
         self.ok = ok
         self.detail = detail
         self.attempts = attempts
         self.verified = verified
+        self.category = SUBMISSION_OK if ok and verified else (category or classify_submission_failure(detail))
 
 
 class CommandHandoffSender:
@@ -47,17 +70,21 @@ class CommandHandoffSender:
         self.chat_url = str(config.chat_url)
 
     def submit(self, report: str) -> HandoffSubmission:
-        wrapped_report = build_automated_prompt(report, control_text=AUDITOR_RESPONSE_CONTRACT)
+        try:
+            wrapped_report = build_automated_prompt(report, control_text=AUDITOR_RESPONSE_CONTRACT)
+        except (TypeError, ValueError) as exc:
+            return HandoffSubmission(False, str(exc), category=SUBMISSION_CONFIGURATION_ERROR)
         if not self.command:
             from .chatgpt_sender import BrowserChatGPTSender
             return BrowserChatGPTSender(type("Config", (), {"chat_url": self.chat_url})()).submit(wrapped_report)
         try:
             result = subprocess.run([*shlex.split(self.command), "--url", self.chat_url], input=wrapped_report, text=True, capture_output=True, timeout=120, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return HandoffSubmission(False, type(exc).__name__)
+            return HandoffSubmission(False, type(exc).__name__, category=classify_submission_failure(str(exc), exc))
         output = (result.stdout or "") + "\n" + (result.stderr or "")
         verified = result.returncode == 0 and "SUBMITTED" in output.upper()
-        return HandoffSubmission(verified, output[-1000:].strip() or f"exit={result.returncode}", verified=verified)
+        detail = output[-1000:].strip() or f"exit={result.returncode}"
+        return HandoffSubmission(verified, detail, verified=verified, category=SUBMISSION_OK if verified else classify_submission_failure(detail))
 
 
 def validate_return_envelope(report: str) -> dict[str, str]:

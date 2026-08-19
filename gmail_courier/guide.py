@@ -225,6 +225,28 @@ transport envelope before sending it:
 The calling Agent must not add or imitate these wrapper sections. Python adds
 them consistently for every outbound send entry point.
 
+## Chat payload policy and security boundaries
+
+All Python-to-Chat entry points use the `CHAT` content policy. The quoted
+payload is treated as opaque task context: ordinary project facts, numbers,
+paths, commit IDs, configuration details, and command-like wording are not
+classified, redacted, or blocked by Courier. Courier validates only transport
+requirements such as text encoding, allowed characters, URL, identity, path,
+and request integrity.
+
+This policy does not disable Codex or host safety review. If the host prevents
+Python, Chrome, or an external send from starting, Courier must report the
+operation as `sandbox_denied`; it must not rename, encode, split, hide, or
+reroute the request. `chat_submission_error`, `chrome_error`,
+`network_error`, and `configuration_error` identify failures after Courier has
+started. These events must not be described as Gmail failures.
+
+Chat payload transparency is not permission to deliberately send OAuth tokens,
+passwords, private keys, or other credentials. Such material remains subject
+to platform and host security controls. GitHub, repository mutation, commit,
+and push operations retain their existing stricter safety boundary; this Chat
+transport policy does not weaken them.
+
 The Agent creates the round ID, for example `<project-code>-20260819-001`,
 and passes it as `correlation_id`. The sender adds the routing rule inside the
 Courier control protocol:
@@ -417,8 +439,17 @@ successful receipt and not permission to execute its contents automatically.
 
 The command emits JSON lines such as:
 
+- `submission_started`: Courier began an explicitly authorized Chat send.
 - `chat_submitted`: the prompt was visibly accepted by the configured ChatGPT
   conversation.
+- `configuration_error`: Courier rejected URL, identity, path, encoding, or
+  another local transport requirement before external submission.
+- `sandbox_denied`: the host/security layer denied execution or external access;
+  Courier must not retry through another tool.
+- `chrome_error`: Chrome/CDP/profile startup or browser transport failed.
+- `network_error`: a network or bounded transport operation failed after the
+  Courier process started.
+- `chat_submission_error`: ChatGPT did not visibly accept the submitted turn.
 - `gmail_poll`: one polling attempt completed; it may have found nothing.
 - `gmail_received`: the exact delivery was validated and written. Read
   `matched_inbox_paths` for the delivery directories and
@@ -435,10 +466,14 @@ nonzero exit code.
 
 ## Troubleshooting and safe interpretation
 
-- `configuration_failed` or an outbox validation error means the caller did
-  not provide a safe contract. Correct the URL, project ID, correlation ID,
-  task ID, keyword, path, or encoding before retrying.
-- `chat_submit_failed` means the prompt was not verified as submitted. Do not
+- `configuration_error` or an outbox validation error means the caller did
+  not provide a valid local transport contract. Correct the URL, project ID,
+  correlation ID, task ID, keyword, path, or encoding before retrying.
+- `sandbox_denied` means the host blocked the operation. Do not
+  reinterpret it as a Python, Chrome, or Gmail failure and do not use a
+  different external tool as an automatic fallback.
+- `chrome_error`, `network_error`, or `chat_submission_error` means Courier
+  started but the Chat send was not verified. Do not
   start interpreting Gmail as the response for that round.
 - `gmail_candidate` means Python found a recent self-sent message that may be
   related but cannot prove the contract. Inspect its `candidate_path`; do not

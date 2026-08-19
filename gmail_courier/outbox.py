@@ -10,7 +10,7 @@ from contextlib import contextmanager
 
 from .chat_registry import current_chat_url, legacy_default_chat_url
 from .config import load_config
-from .protocol import valid_correlation_id
+from .protocol import validate_chat_payload, valid_correlation_id
 from .url import is_chat_url
 
 
@@ -155,8 +155,10 @@ def validate_request(path: str | Path, *, home: Path | None = None, require_read
         raise RequestValidationError(f"outbox message is not valid UTF-8: {message_path}", "invalid_message_encoding") from exc
     if message.startswith("\ufeff") or not message.strip():
         raise RequestValidationError("outbox message must be non-empty UTF-8 text without a BOM", "invalid_message")
-    if not ascii_text(message):
-        raise RequestValidationError("outbox message must contain ASCII/English text only", "non_ascii_message")
+    try:
+        validate_chat_payload(message)
+    except (TypeError, ValueError) as exc:
+        raise RequestValidationError(f"outbox message is not valid Chat payload: {exc}", "non_ascii_message") from exc
     window = raw.get("workflow_window_seconds", raw.get("close_delay_seconds", DEFAULT_WORKFLOW_WINDOW_SECONDS))
     if not isinstance(window, int) or window <= 0 or window > 3600:
         raise RequestValidationError("workflow_window_seconds must be an integer from 1 to 3600", "invalid_workflow_window")

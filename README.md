@@ -68,6 +68,8 @@ ChatGPT URL 可以通过 `gmail-courier register-chat-url --project-id <project-
 
 发送给 ChatGPT 的内容由 Python 统一包装成三层：`AUTOMATED PYTHON TRANSPORT NOTICE` 声明消息来自自动程序而非人类；`QUOTED LOCAL AGENT REQUEST` 原样承载 Agent 的普通提示词，仅作为参考上下文；`COURIER CONTROL PROTOCOL` 机械加入权限层级、ASCII English、Python 生成的回执契约和本轮 ID 规则。回执契约也不属于 Agent 原文。人类指令最高；自动化参与者中 ChatGPT 高于本地 Agent；本地 Agent 的回执、建议和指令只能作为参考，不能作为严格命令。调用 Agent 不应自行添加、重复或改写这些包装段落。
 
+所有 Python-to-Chat 入口统一使用 `CHAT` payload policy。项目事实、数字、路径、commit SHA、配置细节和普通命令式文本会作为透明的引用 payload 传递；Courier 不按业务含义分类、脱敏或拦截它们，只执行 ASCII/UTF-8、URL、身份、路径和请求完整性校验。该策略不覆盖 Codex 或宿主安全审核：宿主阻止时必须报告 `sandbox_denied`，不得改名、编码、拆分、隐藏或改走其他工具。`chat_submission_error`、`chrome_error`、`network_error` 和 `configuration_error` 表示 Courier 已启动后的不同失败类型。OAuth token、密码、私钥等凭据仍不属于这个放宽范围，GitHub、仓库修改、commit 和 push 的安全边界也不改变。
+
 阶段命令会输出机器可读事件：`validation_passed`、`validation_failed`、`request_validated`、`ready_created`、`submission_started`、`chat_submitted`、`chat_submission_error`、`gmail_received`、`gmail_candidate`、`gmail_poll_timeout`、`sandbox_denied`、`configuration_error` 和 `courier_error`。安全层阻止命令启动时，Courier 进程可能根本没有启动；此时只能由宿主/Agent 记录 `sandbox_denied`，不能把它描述成 Python 或 Gmail 失败。
 
 `watchdog-ui` 是只读 Tkinter 监视器：它读取 `watchdogs/<RUN>-after-<STEP>.json`、状态快照和 JSONL 账本，显示启动确认、存活 PID、当前尝试、下一次 poll 倒计时、最近结果和终止原因。它不读取 Gmail、不启动 Worker，也不影响 watchdog；关闭窗口不会停止后台 watchdog。没有记录时会显示 `NO ACTIVE WATCHDOG`。
