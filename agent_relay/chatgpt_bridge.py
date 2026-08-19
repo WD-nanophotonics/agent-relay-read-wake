@@ -1,4 +1,4 @@
-"""Short-lived durable bridge between one fixed ChatGPT thread and Agent A.
+"""Short-lived durable bridge between one configured ChatGPT thread and Agent A.
 
 This module intentionally has no polling loop or daemon.  Each invocation reads
 at most one visible assistant turn, stores its raw UTF-8 bytes, and lets the
@@ -15,6 +15,7 @@ import sys
 from uuid import uuid4
 
 from .handoff import HandoffSubmission
+from .config import chat_urls_match
 from .storage import atomic_json, now
 
 
@@ -53,7 +54,7 @@ def persist_turn(root: Path, turn: ChatGPTTurn) -> Path | None:
     task.mkdir(parents=True, exist_ok=False)
     (task / "payload.md").write_bytes(raw)
     atomic_json(task / "manifest.json", {
-        "nonce": nonce, "created_by": "A", "source": "fixed_chatgpt_dom",
+        "nonce": nonce, "created_by": "A", "source": "configured_chatgpt_dom",
         "turn_identity": turn.identity, "payload_sha256": digest, "created_at": now(),
     })
     atomic_json(task / "chatgpt_turn.json", {"identity": turn.identity, "sha256": digest, "text": turn.text})
@@ -70,7 +71,7 @@ def configure(root: Path, *, chat_url: str) -> Path:
 
 
 def capture_latest_assistant_turn(root: Path) -> ChatGPTTurn | None:
-    """Read one visible assistant turn from the configured fixed thread.
+    """Read one visible assistant turn from the configured conversation.
 
     The returned text is taken directly from the rendered conversation.  The
     DOM message id is preferred; the URL/message ordinal/content hash tuple is
@@ -87,9 +88,9 @@ def capture_latest_assistant_turn(root: Path) -> ChatGPTTurn | None:
             context = browser.contexts[0] if browser.contexts else None
             if context is None:
                 raise RuntimeError("Chrome CDP has no browser context")
-            page = next((item for item in context.pages if item.url.rstrip("/") == sender.url.rstrip("/")), None)
+            page = next((item for item in context.pages if chat_urls_match(item.url, sender.url)), None)
             if page is None:
-                raise RuntimeError("fixed ChatGPT conversation is not open")
+                raise RuntimeError("configured ChatGPT conversation is not open")
             messages = page.locator("[data-message-author-role='assistant']")
             count = messages.count()
             if not count:

@@ -20,7 +20,7 @@ import agent_relay.worker as worker_module
 
 
 def body(step=1):
-    return f"AGENTRELAY/1\n\nCHANNEL: AR-GMAILCOURIER-A1R7P\nRUN: RUN-CERT-001\nSTEP: {step:04d}\nPARENT: {step-1:04d}\nDISPOSITION: WAKE\nPROJECT: gmail-courier\n\nTask"
+    return f"AGENTRELAY/1\n\nCHANNEL: TEST-CHANNEL\nRUN: RUN-CERT-001\nSTEP: {step:04d}\nPARENT: {step-1:04d}\nDISPOSITION: WAKE\nPROJECT: test-project\n\nTask"
 
 
 class Mail:
@@ -45,7 +45,7 @@ class Launcher:
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp); cfg = RelayConfig("gmail-courier", "Gmail", "AR-GMAILCOURIER-A1R7P", Path.cwd(), root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
+        root = Path(tmp); cfg = RelayConfig("test-project", "Test Project", "TEST-CHANNEL", Path.cwd(), root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
         msg = GmailMessage("m1", "t", None, body(), ())
         staged_probe = root / "staged-probe"; staged_probe.mkdir(parents=True); (staged_probe / "message.txt").write_text("AUTHORITATIVE " + ("x" * 200000), encoding="utf-8")
         captured = {}
@@ -94,7 +94,7 @@ def main():
                 assert first is True and second is False
         print("SINGLE_POLL_PROCESS_PASS")
 
-        claim_root = root / "claim"; claim_cfg = replace(cfg, local_project_storage=claim_root); claim_msg = GmailMessage("claim", "t", None, body(), ()); claim_stage = stage_instruction(claim_root, claim_msg, parse_envelope(claim_msg.body)); store = StateStore(claim_root); store.save({**store.load(), "pending_worker": {"worker_id": "claimed", "pid": __import__("os").getpid(), "project_id": "gmail-courier", "run_id": "RUN-CERT-001", "step": 1, "parent": 0, "message_id": "claim", "content_hash": "h", "exe": "python.exe"}}); claim_sender = Sender(); claim_worker = OneShotWorker(claim_cfg, executor=lambda text, path: WorkerOutcome(True, "ok"), handoff_sender=claim_sender); assert claim_worker.run(run_id="RUN-CERT-001", step=1, staged_path=claim_stage, worker_id="claimed", message_id="claim", content_hash="h").ok; assert StateStore(claim_root).load()["consumed_message_ids"] == ["claim"]; print("TRANSACTIONAL_WORKER_CLAIM_PASS")
+        claim_root = root / "claim"; claim_cfg = replace(cfg, local_project_storage=claim_root); claim_msg = GmailMessage("claim", "t", None, body(), ()); claim_stage = stage_instruction(claim_root, claim_msg, parse_envelope(claim_msg.body)); store = StateStore(claim_root); store.save({**store.load(), "pending_worker": {"worker_id": "claimed", "pid": __import__("os").getpid(), "project_id": "test-project", "run_id": "RUN-CERT-001", "step": 1, "parent": 0, "message_id": "claim", "content_hash": "h", "exe": "python.exe"}}); claim_sender = Sender(); claim_worker = OneShotWorker(claim_cfg, executor=lambda text, path: WorkerOutcome(True, "ok"), handoff_sender=claim_sender); assert claim_worker.run(run_id="RUN-CERT-001", step=1, staged_path=claim_stage, worker_id="claimed", message_id="claim", content_hash="h").ok; assert StateStore(claim_root).load()["consumed_message_ids"] == ["claim"]; print("TRANSACTIONAL_WORKER_CLAIM_PASS")
 
         assert exact_owner_live({"pid": __import__("os").getpid(), "exe": "python.exe"}) is True; import agent_relay.watchdog as watchdog; assert watchdog.exact_owner_live is exact_owner_live; print("WINDOWS_OWNER_VALIDATION_PASS")
         ticks = [0.0]; sleeps = []; fake_clock = lambda: ticks[0]; fake_sleep = lambda n: (sleeps.append(n), ticks.__setitem__(0, ticks[0] + n)); result = run_watchdog(replace(cfg, local_project_storage=root / "wd"), run_id="RUN-CERT-001", after_step=1, poll_factory=lambda: Relay(replace(cfg, local_project_storage=root / "wd"), Mail([]), Launcher(-1)), sleep=fake_sleep, clock=fake_clock, poll_interval_seconds=20, max_polls=10, poll_timeout_seconds=2, ui_spawn=lambda: None); assert result == "exhausted" and sleeps; print("TWO_SHOT_WATCHDOG_PASS")

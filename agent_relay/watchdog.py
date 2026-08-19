@@ -415,6 +415,9 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory=None, sle
         deadline = started_clock + service_window_seconds
         poll_number = 0
         while True:
+            active_owner = state_store.load().get("active_worker")
+            if isinstance(active_owner, dict) and exact_owner_live(active_owner):
+                return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "ACTIVE", "active_worker", return_value="active")
             if max_polls is not None:
                 if poll_number >= max_polls:
                     break

@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from typing import Any
 
-from .config import EXPECTED_CHAT_URL
+from .config import is_chat_url
 from .storage import atomic_json, now
 
 
@@ -26,9 +26,9 @@ class HandoffSubmission:
 
 
 class CommandHandoffSender:
-    """Bounded bridge to the installed fixed-URL ChatGPT sender.
+    """Bounded bridge to the configured ChatGPT sender.
 
-    The command receives ``--url <fixed-url>`` and the exact handoff envelope
+    The command receives ``--url <conversation-url>`` and the exact handoff envelope
     on stdin, and must print ``SUBMITTED`` after the UI/API submission is
     visibly acknowledged. It is one short-lived process, never a supervisor.
     """
@@ -41,8 +41,6 @@ class CommandHandoffSender:
         if not self.command:
             from .chatgpt_sender import BrowserChatGPTSender
             return BrowserChatGPTSender(type("Config", (), {"chat_url": self.chat_url})()).submit(report)
-        if self.chat_url != EXPECTED_CHAT_URL:
-            return HandoffSubmission(False, "fixed ChatGPT sender is not configured")
         try:
             result = subprocess.run([*shlex.split(self.command), "--url", self.chat_url], input=report, text=True, capture_output=True, timeout=120, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -156,8 +154,8 @@ def write_evidence(
     submission_verified: bool = True,
     watchdog_startup_verified: bool | None = None,
 ) -> Path:
-    if chat_url != EXPECTED_CHAT_URL:
-        raise ValueError("handoff URL does not match the fixed ChatGPT target")
+    if not is_chat_url(chat_url):
+        raise ValueError("handoff URL must be HTTPS on chatgpt.com and contain /c/<conversation-id>")
     if not handoff_token or send_attempts != 1 or not 0 <= navigation_attempts <= 2 or not 0 <= verification_attempts <= 1 or submission_verified is not True:
         raise ValueError("handoff evidence exceeds the bounded certification contract")
     target = evidence_path(project_storage, lease_id)
@@ -203,7 +201,7 @@ def validate_evidence(project_storage: Path, active: dict[str, Any], *, handoff_
         or value.get("lease_id") != active.get("lease_id")
         or value.get("worker_id") != active.get("worker_id")
         or value.get("handoff_token") != expected_token
-        or value.get("chat_url") != EXPECTED_CHAT_URL
+        or value.get("chat_url") != active.get("chat_url")
         or value.get("send_attempts") != 1
         or not isinstance(value.get("navigation_attempts"), int) or not 0 <= value["navigation_attempts"] <= 2
         or not isinstance(value.get("verification_attempts"), int) or not 0 <= value["verification_attempts"] <= 1

@@ -17,7 +17,7 @@ import time
 from uuid import uuid4
 
 
-MECHANICS_REPO = Path(r"C:\Users\icywo\Documents\ChatGPT\test mechanics sim")
+MECHANICS_REPO = Path(os.environ.get("RELAY_CERT_REPOSITORY", Path.cwd()))
 EXPECTED_BRANCH = "sandbox"
 AGENTRELAY_REPO = Path(__file__).resolve().parents[1]
 DIAGNOSTIC_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.cwd()))) / "AgentRelay" / "diagnostics" / "mechanics-wake-probe"
@@ -203,7 +203,7 @@ def run_probe(*, run_number: int, codex_exe: str, diagnostics: Path) -> dict:
 def main() -> int:
     if not MECHANICS_REPO.is_dir():
         raise SystemExit(f"missing mechanics repo: {MECHANICS_REPO}")
-    codex_exe = shutil.which("codex.cmd") or shutil.which("codex")
+    codex_exe = shutil.which("codex") or shutil.which("codex.cmd")
     if not codex_exe:
         raise SystemExit("Codex executable not found")
     DIAGNOSTIC_ROOT.mkdir(parents=True, exist_ok=True)

@@ -174,7 +174,7 @@ def _codex(root: Path, role: str, instruction: Path, repository: Path) -> None:
     """Run a real Codex role; its only prompt is a file-location bootstrap."""
     prompt = f"You are local {role}. Read the durable instruction file at {instruction}. It is your sole authority. Follow it exactly, write only the requested durable output file, and exit."
     command = [
-        os.environ.get("AGENT_RELAY_CODEX_COMMAND", "codex.cmd"),
+        os.environ.get("AGENT_RELAY_CODEX_COMMAND", "codex"),
         "exec", "--model", LUNA_MODEL,
         "-c", f"model_reasoning_effort={LUNA_REASONING_EFFORT}",
         "--approve-for-me", "-",

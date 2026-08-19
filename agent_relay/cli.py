@@ -38,21 +38,38 @@ def main(argv=None) -> int:
     parser.add_argument("--watchdog-id")
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
+    parser.add_argument("--chat-url")
+    parser.add_argument("--project-id")
+    parser.add_argument("--display-name")
+    parser.add_argument("--channel-id")
+    parser.add_argument("--repo-path")
+    parser.add_argument("--local-project-storage")
+    parser.add_argument("--gmail-auth-home")
     args = parser.parse_args(argv)
     home = app_home()
     if args.command == "init":
         path = config_path(home)
         if not path.exists():
             home.mkdir(parents=True, exist_ok=True)
-            write_example(path, Path.cwd())
+            write_example(path)
             print(f"CREATED {path}")
         else:
             print(f"EXISTS {path}")
         return 0
     if args.command == "bind":
-        if not args.target_id:
-            parser.error("bind requires --target-id")
-        print(f"BOUND {save_binding(home, target_id=args.target_id, target_type=args.target_type)}")
+        required = ("project_id", "display_name", "channel_id", "repo_path", "local_project_storage", "gmail_auth_home", "target_id")
+        missing = [name for name in required if not getattr(args, name)]
+        if missing:
+            parser.error(f"bind requires --{missing[0].replace('_', '-')}")
+        if args.target_type != "mock" and not args.chat_url:
+            parser.error("bind requires --chat-url for a non-mock target")
+        binding = save_binding(home, project_id=args.project_id, display_name=args.display_name, channel_id=args.channel_id, repo_path=Path(args.repo_path), local_project_storage=Path(args.local_project_storage), gmail_auth_home=Path(args.gmail_auth_home), target_id=args.target_id, target_type=args.target_type, chat_url=args.chat_url or '')
+        from gmail_courier.guide import GUIDE_FILENAME, install_guide
+        project_root = Path(args.repo_path).expanduser().resolve()
+        guide = project_root / GUIDE_FILENAME
+        if not guide.exists():
+            install_guide(project_root)
+        print(f"BOUND {binding}\nGUIDE {guide}")
         return 0
     config = load_config(home)
     store = StateStore(config.local_project_storage)

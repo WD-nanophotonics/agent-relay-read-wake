@@ -10,8 +10,8 @@ import time
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
-MECHANICS = Path(r"C:\Users\icywo\Documents\ChatGPT\test mechanics sim")
-CHAT_URL = "https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9"
+MECHANICS = Path(os.environ.get("RELAY_CERT_REPOSITORY", Path.cwd()))
+CHAT_URL = os.environ.get("RELAY_CERT_CHAT_URL", "")
 
 
 def git(repo: Path, *args: str) -> str:
@@ -37,7 +37,7 @@ chat_url = "{CHAT_URL}"
 poll_interval = 10
 enabled = true
 gmail_auth_home = "{gmail_home.as_posix()}"
-codex_command = "codex.cmd"
+codex_command = "codex"
 handoff_command = ""
 ''', encoding="utf-8")
     nonce = f"CONTROL-TURN-A-{uuid4()}"

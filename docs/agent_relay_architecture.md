@@ -74,7 +74,7 @@ and the normal poller continues the validated next work automatically.
 - `wake_instruction`: the one template for the lease contract.
 - `GoogleGmailGateway`: unchanged read-only Gmail boundary.
 
-Phase 3A does not broaden Chrome/ChatGPT automation. A fixed ChatGPT handoff
+Phase 3A does not broaden Chrome/ChatGPT automation. A configured ChatGPT handoff
 remains an externally verified report; the next Gmail step must be authored and
 sent by the ChatGPT conversation, never by the background worker.
 

@@ -19,7 +19,7 @@ from agent_relay.watchdog import load_watchdog_status
 from gmail_courier.config import home_dir
 
 ROOT = Path(__file__).resolve().parents[1]
-MECHANICS = Path(r"C:\Users\icywo\Documents\ChatGPT\test mechanics sim")
+MECHANICS = Path(os.environ.get("RELAY_CERT_REPOSITORY", Path.cwd()))
 
 
 def git(repo: Path, *args: str) -> str:
@@ -31,19 +31,19 @@ def git(repo: Path, *args: str) -> str:
 
 def config_text(home: Path, storage: Path, repo: Path) -> str:
     return f'''[project]
-project_id = "managed-agent-cert"
-display_name = "Managed Agent Certification"
-channel_id = "AR-MANAGED-AGENT-CERT"
+project_id = "test-project"
+display_name = "Test Project"
+channel_id = "AR-TEST-CHANNEL"
 repo_path = "{repo.as_posix()}"
 local_project_storage = "{storage.as_posix()}"
 target_type = "codex-cli"
 target_id = ""
-target_label = "externally owned bounded Agent"
-chat_url = "https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9"
+target_label = "test target"
+chat_url = "{os.environ.get("RELAY_CERT_CHAT_URL", "")}"
 poll_interval = 20
 enabled = true
 gmail_auth_home = "{home_dir().as_posix()}"
-codex_command = "codex.cmd"
+codex_command = "codex"
 handoff_command = ""
 '''
 

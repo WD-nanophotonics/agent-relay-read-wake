@@ -21,8 +21,8 @@ from agent_relay.storage import StateStore, read_content_hash, stage_instruction
 from agent_relay.worker import ProcessWorkerLauncher
 
 AGENTRELAY_REPO = Path(__file__).resolve().parents[1]
-MECHANICS_REPO = Path(r"C:\Users\icywo\Documents\ChatGPT\test mechanics sim")
-REAL_STORAGE = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "AgentRelay" / "projects" / "gmail-courier"
+MECHANICS_REPO = Path(os.environ.get("RELAY_CERT_REPOSITORY", Path.cwd()))
+REAL_STORAGE = Path(os.environ.get("RELAY_CERT_STORAGE", str(Path.cwd() / ".relay-cert-storage")))
 DIAGNOSTIC_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.cwd()))) / "AgentRelay" / "diagnostics" / "production-worker-wake"
 
 
@@ -93,7 +93,7 @@ def config_text(storage: Path) -> str:
 project_id = "production-worker-wake-probe"
 display_name = "Production Worker Wake Probe"
 channel_id = "AR-PRODUCTION-WORKER-WAKE-PROBE"
-repo_path = "C:/Users/icywo/Documents/ChatGPT/test mechanics sim"
+repo_path = "<repository-path>"
 local_project_storage = "{storage}"
 target_type = "codex-cli"
 target_id = ""
@@ -102,7 +102,7 @@ chat_url = "{chat_url}"
 poll_interval = 20
 enabled = true
 gmail_auth_home = "{gmail_home}"
-codex_command = "codex.cmd"
+codex_command = "codex"
 handoff_command = ""
 """.format(storage=storage.as_posix(), chat_url=EXPECTED_CHAT_URL, gmail_home=(storage / "gmail").as_posix())
 

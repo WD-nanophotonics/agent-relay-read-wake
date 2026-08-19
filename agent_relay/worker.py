@@ -263,7 +263,7 @@ class OneShotWorker:
         self.store.save(state)
 
     def _subprocess_executor(self, staged_path: str | Path, repo_path: Path) -> WorkerOutcome:
-        command = getattr(self.config, "codex_command", "codex.cmd")
+        command = getattr(self.config, "codex_command", "codex")
         staged_path = Path(staged_path).resolve()
         if not (staged_path / "message.txt").is_file():
             return WorkerOutcome(False, f"staged instruction missing: {staged_path}")

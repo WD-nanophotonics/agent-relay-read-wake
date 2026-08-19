@@ -145,7 +145,7 @@ def controller(root: Path, nonce: str, parent_death: bool) -> None:
         from .chatgpt_bridge import submit_durable_result
         delivery = submit_durable_result(root, nonce, _result_text(value))
         if not delivery.get("verified"):
-            raise RuntimeError("fixed ChatGPT result delivery was not verified")
+            raise RuntimeError("configured ChatGPT result delivery was not verified")
     atomic_json(root / "terminal" / f"{nonce}.json", {"nonce": nonce, "state": "COMPLETE", "at": now()})
     _event(root, "cycle_complete", role="A", nonce=nonce)
 

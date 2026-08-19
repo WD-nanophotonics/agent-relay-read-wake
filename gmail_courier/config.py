@@ -7,11 +7,10 @@ import re
 import tomllib
 from typing import Any
 
+from .url import is_chat_url
+
 
 DEFAULT_HOME_NAME = "GmailCourier"
-DEFAULT_ADDRESS = "icywoods.1@gmail.com"
-DEFAULT_PREFIX = "[GMAIL-COURIER]"
-DEFAULT_LEGACY_PREFIX = "[GC-BRIDGE]"
 CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]*$")
 
 
@@ -36,6 +35,7 @@ class ProjectConfig:
     remote_url: str | None
     push: bool
     legacy_prefixes: tuple[str, ...]
+    chat_url: str = ""
 
     @property
     def codes(self) -> tuple[str, ...]:
@@ -70,12 +70,14 @@ def _path(value: Any, field: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def _relative_path(value: Any, field: str) -> Path:
+def _inbox_path(value: Any, field: str) -> Path:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a non-empty relative path")
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"{field} must stay inside the project root")
+        raise ValueError(f"{field} must be a non-empty path")
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    if ".." in path.parts:
+        raise ValueError(f"{field} relative paths must stay inside the project root")
     return path
 
 
@@ -95,16 +97,19 @@ def _codes(value: Any, field: str, required: bool = True) -> tuple[str, ...]:
 def load_config(home: Path | None = None) -> CourierConfig:
     path = config_path(home)
     if not path.exists():
-        raise FileNotFoundError(f"Courier registry not found: {path}; create it from projects.example.toml")
+        raise FileNotFoundError(f"Courier registry not found: {path}; create it from the generic projects.example.toml template")
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     protocol = raw.get("protocol", {})
-    address = raw.get("account", {}).get("address", DEFAULT_ADDRESS)
-    prefix = protocol.get("prefix", DEFAULT_PREFIX)
-    legacy_prefix = protocol.get("legacy_prefix", DEFAULT_LEGACY_PREFIX)
+    account = raw.get("account", {})
+    address = account.get("address") if isinstance(account, dict) else None
+    prefix = protocol.get("prefix")
+    legacy_prefix = protocol.get("legacy_prefix", "")
     if not isinstance(address, str) or "@" not in address:
-        raise ValueError("account.address must be a valid email address")
-    if not isinstance(prefix, str) or not prefix.startswith("["):
-        raise ValueError("protocol.prefix must be a bracketed marker")
+        raise ValueError("account.address must be configured as a valid email address")
+    if not isinstance(prefix, str) or not prefix.startswith("[") or not prefix.endswith("]"):
+        raise ValueError("protocol.prefix must be configured as a bracketed marker")
+    if not isinstance(legacy_prefix, str) or (legacy_prefix and not legacy_prefix.startswith("[")):
+        raise ValueError("protocol.legacy_prefix must be empty or a bracketed marker")
     entries = raw.get("projects", [])
     if not isinstance(entries, list) or not entries:
         raise ValueError("at least one [[projects]] entry is required")
@@ -123,7 +128,10 @@ def load_config(home: Path | None = None) -> CourierConfig:
                 raise ValueError(f"project code {candidate} is ambiguous between {seen[candidate]} and {code}")
             seen[candidate] = code
         root = _path(item.get("root"), f"projects[{index}].root")
-        inbox = _relative_path(item.get("inbox", "inbox"), f"projects[{index}].inbox")
+        if not root.is_dir():
+            raise ValueError(f"projects[{index}].root must exist and be a directory: {root}")
+        inbox_value = item.get("inbox", f"inbox/{code.lower()}")
+        inbox = _inbox_path(inbox_value, f"projects[{index}].inbox")
         branch = item.get("branch", "")
         remote = item.get("remote", "origin")
         if not isinstance(branch, str) or not branch.strip():
@@ -133,33 +141,44 @@ def load_config(home: Path | None = None) -> CourierConfig:
         remote_url = item.get("remote_url")
         if remote_url is not None and not isinstance(remote_url, str):
             raise ValueError(f"projects[{index}].remote_url must be a string")
+        push = bool(item.get("push", True))
+        if push and inbox.is_absolute():
+            try:
+                inbox.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(f"projects[{index}].push must be false when inbox is outside root") from exc
         legacy = item.get("legacy_prefixes", [])
         if not isinstance(legacy, list) or any(not isinstance(value, str) for value in legacy):
             raise ValueError(f"projects[{index}].legacy_prefixes must be an array of strings")
-        projects.append(ProjectConfig(code, aliases, root, inbox, branch, remote, remote_url, bool(item.get("push", True)), tuple(legacy)))
+        chat_url = item.get("chat_url", "")
+        if not isinstance(chat_url, str) or (chat_url and not is_chat_url(chat_url)):
+            raise ValueError(f"projects[{index}].chat_url must be empty or a valid HTTPS ChatGPT conversation URL")
+        projects.append(ProjectConfig(code, aliases, root, inbox, branch, remote, remote_url, push, tuple(legacy), chat_url))
     return CourierConfig(address, prefix, legacy_prefix, tuple(projects))
 
 
-def write_default_config(home: Path | None = None, *, generic_chess_root: Path | None = None) -> Path:
+def write_default_config(home: Path | None = None) -> Path:
     target_home = home or home_dir()
     target_home.mkdir(parents=True, exist_ok=True)
     target = config_path(target_home)
-    root = generic_chess_root or (Path.home() / "PycharmProjects" / "GenericChess-chat")
     target.write_text(
+        "# Generic template. Fill every required value before starting the courier.\n"
         "[account]\n"
-        f'address = "{DEFAULT_ADDRESS}"\n\n'
+        'address = ""\n\n'
         "[protocol]\n"
-        f'prefix = "{DEFAULT_PREFIX}"\n'
-        f'legacy_prefix = "{DEFAULT_LEGACY_PREFIX}"\n\n'
+        'prefix = "[AUTOMATION]"\n'
+        'legacy_prefix = ""\n\n'
         "[[projects]]\n"
-        'code = "GENERICCHESS"\n'
-        'aliases = ["GC"]\n'
-        f'root = "{root.as_posix()}"\n'
-        'inbox = "coordination/inbox"\n'
-        'branch = "chat"\n'
+        'code = ""\n'
+        'aliases = []\n'
+        'root = ""\n'
+        '# Omit inbox for the safe default: <root>/inbox/<project-id>.\n'
+        '# Set inbox to a relative path under root or an explicit absolute path.\n'
+        'branch = ""\n'
         'remote = "origin"\n'
-        'push = true\n'
-        'legacy_prefixes = ["[GC-BRIDGE]"]\n',
+        'push = false\n'
+        'legacy_prefixes = []\n'
+        'chat_url = ""\n',
         encoding="utf-8",
     )
     return target

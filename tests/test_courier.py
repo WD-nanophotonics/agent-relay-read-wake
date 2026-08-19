@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from gmail_courier.config import CourierConfig, ProjectConfig, load_config
-from gmail_courier.core import State, assert_project_repo, commit_and_push, parse_subject, receive_message, route_project, safe_name
+from gmail_courier.core import DeliveryExpectation, State, assert_project_repo, build_query, commit_and_push, inspect_candidate, matching_document, parse_subject, quarantine_candidate, receive_message, route_project, safe_name
+from gmail_courier.protocol import valid_correlation_id
 
 
 class Request:
@@ -72,10 +73,10 @@ def project(root: Path, *, code="ALPHA", push=False, branch="main", legacy=()) -
 
 
 def config_for(projects: tuple[ProjectConfig, ...]) -> CourierConfig:
-    return CourierConfig("me@example.com", "[GMAIL-COURIER]", "[GC-BRIDGE]", projects)
+    return CourierConfig("me@example.com", "[AUTOMATION]", "[LEGACY]", projects)
 
 
-def message(subject="[GMAIL-COURIER][ALPHA][TASK] test", attachments=True):
+def message(subject="[AUTOMATION][ALPHA][TASK] test", attachments=True):
     payload = {"headers": [
         {"name": "Subject", "value": subject},
         {"name": "From", "value": "me@example.com"},
@@ -92,16 +93,109 @@ class CourierTests(unittest.TestCase):
             alpha = project(Path(tmp), code="ALPHA")
             beta = ProjectConfig("BETA", ("B",), Path(tmp), Path("inbox2"), "main", "origin", None, False, ())
             config = config_for((alpha, beta))
-            info = parse_subject("[GMAIL-COURIER][b][AUDIT] report", config)
+            info = parse_subject("[AUTOMATION][b][AUDIT] report", config)
             routed, reason = route_project(info, config)
             self.assertEqual(routed.code, "BETA")
             self.assertIsNone(reason)
             self.assertIsNone(parse_subject("ordinary mail", config))
 
+    def test_retrieval_does_not_require_protocol_subject_marker(self):
+        query = build_query(config_for((project(Path("."),),)))
+        self.assertIn("has:attachment", query)
+        self.assertNotIn("subject:\"[AUTOMATION]\"", query)
+
+    def test_correlation_id_requires_project_prefix_and_digit(self):
+        self.assertTrue(valid_correlation_id("ALPHA", "ALPHA-20260819-001"))
+        self.assertTrue(valid_correlation_id("GENERIC_CHESS", "Generic Chess 42"))
+        self.assertFalse(valid_correlation_id("ALPHA", "BETA-20260819-001"))
+        self.assertFalse(valid_correlation_id("ALPHA", "ALPHA-no-sequence"))
+        self.assertFalse(valid_correlation_id("ALPHA", "ALPHA-2026-中文"))
+
+    def test_correlation_query_is_first_class(self):
+        expected = DeliveryExpectation("ALPHA", "TASK-1", "KEYWORD-1", correlation_id="ALPHA-20260819-001")
+        query = build_query(config_for((project(Path("."),),)), expected, "correlation")
+        self.assertIn('subject:"ALPHA-20260819-001"', query)
+
+    def test_correlation_match_accepts_natural_subject_and_routes_with_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            runtime = Path(tmp) / "runtime"
+            config = config_for((project(root),))
+            full = message("Audit response for ALPHA-20260819-001", attachments=True)
+            service = Gmail(full, data=b"not-the-formal-result-json")
+            expected = DeliveryExpectation("ALPHA", "TASK-1", "KEYWORD-1", correlation_id="ALPHA-20260819-001")
+            document = matching_document(service, config, "gmail-1", expected)
+            self.assertEqual(document["match_mode"], "correlation_id")
+            state = State(runtime)
+            try:
+                with patch("gmail_courier.core.commit_and_push"):
+                    result = receive_message(service, config, state, {"id": "gmail-1"}, runtime, project_hint="ALPHA", correlation_id=expected.correlation_id)
+                self.assertEqual(result, "received")
+                manifest = next((root / "inbox").glob("*/manifest.json"))
+                self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["correlation_id"], expected.correlation_id)
+            finally:
+                state.close()
+
+    def test_correlation_match_ignores_mail_older_than_cutoff(self):
+        expected = DeliveryExpectation("ALPHA", "TASK-1", "KEYWORD-1", correlation_id="ALPHA-20260819-001")
+        service = Gmail(message("Audit response for ALPHA-20260819-001"))
+        self.assertIsNone(matching_document(service, config_for((project(Path("."),),)), "gmail-1", expected, not_before_epoch=2))
+
+    def test_nonstandard_project_candidate_is_quarantined_for_agent_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            runtime = Path(tmp) / "runtime"
+            payload = {
+                "headers": [
+                    {"name": "Subject", "value": "MePhC - ALPHA - TASK - R6.2 Research Field"},
+                    {"name": "From", "value": "me@example.com"},
+                    {"name": "To", "value": "me@example.com"},
+                ],
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"ALPHA audit accepted for R6.2; see attached contract.").decode().rstrip("=")}},
+                    {"filename": "ALPHA_R6_2_contract.json", "body": {"attachmentId": "a1"}},
+                ],
+            }
+            raw = {"id": "candidate-1", "threadId": "thread-1", "internalDate": "1", "payload": payload}
+            service = Gmail(raw, data=b"{\"candidate\":true}")
+            expected = DeliveryExpectation("ALPHA", "Retry-Task", "Retry-Keyword")
+            config = config_for((project(root),))
+            candidate = inspect_candidate(service, config, "candidate-1", expected)
+            self.assertIsNotNone(candidate)
+            self.assertIn("nonstandard-subject", candidate["reasons"])
+            self.assertIn("task-id-not-exact", candidate["reasons"])
+            path = quarantine_candidate(runtime, candidate, service)
+            self.assertTrue((path / "candidate.json").exists())
+            self.assertTrue((path / "body.txt").exists())
+            self.assertFalse((root / "inbox").exists())
+
+    def test_unclassified_new_self_mail_remains_a_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            payload = {
+                "headers": [
+                    {"name": "Subject", "value": "A flexible audit response"},
+                    {"name": "From", "value": "me@example.com"},
+                    {"name": "To", "value": "me@example.com"},
+                ],
+                "parts": [{"filename": "unknown.json", "body": {"attachmentId": "a1"}}],
+            }
+            candidate = inspect_candidate(
+                Gmail({"id": "candidate-2", "payload": payload}),
+                config_for((project(root),)),
+                "candidate-2",
+                DeliveryExpectation("ALPHA", "TASK-1", "KEYWORD-1"),
+            )
+            self.assertEqual(candidate["classification"], "unclassified")
+            self.assertIn("no-project-evidence", candidate["reasons"])
+
     def test_legacy_subject_requires_explicit_project_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
-            registered = project(Path(tmp), legacy=("[GC-BRIDGE]",))
-            info = parse_subject("[GC-BRIDGE][TASK] old", config_for((registered,)))
+            registered = project(Path(tmp), legacy=("[LEGACY]",))
+            info = parse_subject("[LEGACY][TASK] old", config_for((registered,)))
             routed, reason = route_project(info, config_for((registered,)))
             self.assertEqual(routed.code, "ALPHA")
             self.assertIsNone(reason)
@@ -154,7 +248,7 @@ class CourierTests(unittest.TestCase):
             root.mkdir()
             runtime = Path(tmp) / "runtime"
             state = State(runtime)
-            result = receive_message(Gmail(message("[GMAIL-COURIER][UNKNOWN][TASK] bad")), config_for((project(root),)), state, {"id": "gmail-1"}, runtime)
+            result = receive_message(Gmail(message("[AUTOMATION][UNKNOWN][TASK] bad")), config_for((project(root),)), state, {"id": "gmail-1"}, runtime)
             self.assertEqual(result, "quarantined")
             self.assertTrue((runtime / "quarantine" / "gmail-1.json").exists())
             self.assertFalse((root / "inbox").exists())
@@ -189,7 +283,7 @@ class CourierTests(unittest.TestCase):
             state.record("gmail-1", "ALPHA", "inbox/task")
             commit_and_push(project(root), state, state.get("gmail-1"))
             self.assertIn(" M unrelated.txt", self.run_git(root, "status", "--short"))
-            self.assertEqual(self.run_git(root, "log", "-1", "--pretty=%s").strip(), "Receive Gmail Courier delivery task")
+            self.assertEqual(self.run_git(root, "log", "-1", "--pretty=%s").strip(), "Receive automated delivery task")
             state.close()
 
     def test_wrong_branch_fails_closed(self):
@@ -203,14 +297,64 @@ class CourierTests(unittest.TestCase):
     def test_config_rejects_duplicate_codes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "projects.toml"
+            (Path(tmp) / "a").mkdir()
+            (Path(tmp) / "b").mkdir()
             path.write_text(
                 '[account]\naddress="me@example.com"\n\n'
-                '[[projects]]\ncode="A"\nroot="C:/a"\nbranch="main"\n\n'
-                '[[projects]]\ncode="A"\nroot="C:/b"\nbranch="main"\n',
+                '[protocol]\nprefix="[AUTOMATION]"\nlegacy_prefix=""\n\n'
+                '[[projects]]\ncode="A"\nroot="' + (Path(tmp) / "a").as_posix() + '"\nbranch="main"\n\n'
+                '[[projects]]\ncode="A"\nroot="' + (Path(tmp) / "b").as_posix() + '"\nbranch="main"\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "ambiguous"):
                 load_config(Path(tmp))
+
+    def test_config_default_inbox_isolated_by_canonical_project_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            path = Path(tmp) / "projects.toml"
+            path.write_text(
+                '[account]\naddress="me@example.com"\n\n'
+                '[protocol]\nprefix="[AUTOMATION]"\nlegacy_prefix=""\n\n'
+                '[[projects]]\ncode="ALPHA"\nroot="' + root.as_posix() + '"\nbranch="main"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(load_config(Path(tmp)).projects[0].inbox, Path("inbox/alpha"))
+
+    def test_external_inbox_requires_push_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            outside = Path(tmp) / "external-inbox"
+            path = Path(tmp) / "projects.toml"
+            path.write_text(
+                '[account]\naddress="me@example.com"\n\n'
+                '[protocol]\nprefix="[AUTOMATION]"\nlegacy_prefix=""\n\n'
+                '[[projects]]\ncode="ALPHA"\nroot="' + root.as_posix() + '"\ninbox="' + outside.as_posix() + '"\nbranch="main"\npush=true\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "push must be false"):
+                load_config(Path(tmp))
+
+    def test_external_inbox_receives_without_repository_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            external = Path(tmp) / "shared-inbox"
+            runtime = Path(tmp) / "runtime"
+            project_config = ProjectConfig("ALPHA", (), root, external, "main", "origin", None, False, ())
+            state = State(runtime)
+            try:
+                result = receive_message(Gmail(message()), config_for((project_config,)), state, {"id": "gmail-external"}, runtime)
+                self.assertEqual(result, "received")
+                manifest = next(external.glob("*/manifest.json"))
+                self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["project_code"], "ALPHA")
+                row = state.get("gmail-external")
+                self.assertTrue(Path(row["unit_relpath"]).is_absolute())
+                self.assertEqual(row["committed"], 1)
+                self.assertEqual(row["pushed"], 1)
+            finally:
+                state.close()
 
     @staticmethod
     def run_git(root: Path, *args: str) -> str:

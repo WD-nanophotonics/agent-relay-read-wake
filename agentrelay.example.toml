@@ -1,15 +1,15 @@
-# Copy to %LOCALAPPDATA%/AgentRelay/agentrelay.toml; this contains no credentials.
+# Generic template. Replace every empty value before starting the relay.
 [project]
-project_id = "gmail-courier"
-display_name = "Gmail Courier"
-channel_id = "AR-GMAILCOURIER-A1R7P"
-repo_path = "C:/Users/icywo/PycharmProjects/GmailCourier"
-local_project_storage = "C:/Users/icywo/AppData/Local/AgentRelay/projects/gmail-courier"
+project_id = ""
+display_name = ""
+channel_id = ""
+repo_path = ""
+local_project_storage = ""
 target_type = "mock"
 target_id = ""
-target_label = "Gmail Courier Phase 1 mock"
-codex_command = "codex.cmd"
+target_label = ""
+codex_command = "codex"
 chat_url = ""
 poll_interval = 20
 enabled = true
-gmail_auth_home = "C:/Users/icywo/AppData/Local/GmailCourier"
+gmail_auth_home = ""

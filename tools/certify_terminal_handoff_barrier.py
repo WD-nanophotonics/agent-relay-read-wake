@@ -16,7 +16,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_relay.config import EXPECTED_CHAT_URL, RelayConfig
+from agent_relay.config import DEFAULT_CHAT_URL, RelayConfig
 from agent_relay.gmail import GmailMessage
 from agent_relay.handoff import HandoffSubmission
 from agent_relay.obligations import (RESULT_READY, VERIFIED, attempt_handoff,
@@ -42,12 +42,12 @@ class RecordingSender:
         return HandoffSubmission(ok, "SUBMITTED" if ok else "temporary sender failure", verified=ok)
 
 
-def cfg(root: Path, *, chat_url: str = EXPECTED_CHAT_URL) -> RelayConfig:
-    return RelayConfig("handoff-cert", "Terminal Handoff Certification", "AR-HANDOFF-CERT", REPO, root, "codex-cli", "", "cert", chat_url, 20, True, root / "gmail", "codex.cmd", "", "")
+def cfg(root: Path, *, chat_url: str = DEFAULT_CHAT_URL) -> RelayConfig:
+    return RelayConfig("test-project", "Test Project", "AR-TEST-CHANNEL", REPO, root, "codex-cli", "", "test-target", chat_url, 20, True, root / "gmail", "codex", "", "")
 
 
 def body(run_id: str, task: str) -> str:
-    return f"AGENTRELAY/1\n\nCHANNEL: AR-HANDOFF-CERT\nRUN: {run_id}\nSTEP: 0001\nPARENT: 0000\nDISPOSITION: WAKE\nPROJECT: handoff-cert\n\n{task}"
+    return f"AGENTRELAY/1\n\nCHANNEL: AR-TEST-CHANNEL\nRUN: {run_id}\nSTEP: 0001\nPARENT: 0000\nDISPOSITION: WAKE\nPROJECT: test-project\n\n{task}"
 
 
 def prepare(root: Path, task: str) -> tuple[RelayConfig, Path, str, str]:
@@ -61,7 +61,7 @@ def prepare(root: Path, task: str) -> tuple[RelayConfig, Path, str, str]:
 def pending(root: Path, worker_id: str, run_id: str, message_id: str, staged: Path) -> None:
     store = StateStore(root)
     state = default_state()
-    state["pending_worker"] = {"worker_id": worker_id, "pid": os.getpid(), "project_id": "handoff-cert", "run_id": run_id, "step": 1, "parent": 0, "message_id": message_id, "content_hash": "cert-hash", "staged_path": str(staged), "exe": Path(sys.executable).name}
+    state["pending_worker"] = {"worker_id": worker_id, "pid": os.getpid(), "project_id": "test-project", "run_id": run_id, "step": 1, "parent": 0, "message_id": message_id, "content_hash": "cert-hash", "staged_path": str(staged), "exe": Path(sys.executable).name}
     store.save(state)
 
 
@@ -147,7 +147,7 @@ def main() -> int:
         assert recovered_dead and load_obligation(dead_root, dead_id)["state"] == VERIFIED
         print("DEAD_WORKER_RECOVERY_PASS")
 
-        # One real fixed-URL submission through the production sender.  This
+        # One real configured-URL submission through the production sender.  This
         # is intentionally last because it may open/attach to the user Chrome.
         real_root = root / "real-chatgpt"
         real_config = cfg(real_root)

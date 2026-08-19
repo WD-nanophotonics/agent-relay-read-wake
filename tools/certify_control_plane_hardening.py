@@ -34,13 +34,13 @@ class Clock:
 
 
 def cfg(root: Path):
-    return SimpleNamespace(local_project_storage=root, repo_path=Path.cwd(), project_id="pp",
-                           channel_id="AR-CONTROL-TEST", chat_url="https://chatgpt.com/c/6a818a0c-5208-83ee-95cd-fd558d66ecc9")
+    return SimpleNamespace(local_project_storage=root, repo_path=Path.cwd(), project_id="test-project",
+                           channel_id="AR-TEST-CHANNEL", chat_url=os.environ.get("RELAY_CERT_CHAT_URL", ""))
 
 
 def envelope(run="RUN-CONTROL-1", step=1, body="payload"):
     return GmailMessage(f"m-{step}-{body}", "x", None,
-        f"AGENTRELAY/1\n\nCHANNEL: AR-CONTROL-TEST\nRUN: {run}\nSTEP: {step:04d}\nPARENT: {step-1:04d}\nDISPOSITION: WAKE\nPROJECT: pp\n\n{body}", ())
+        f"AGENTRELAY/1\n\nCHANNEL: AR-TEST-CHANNEL\nRUN: {run}\nSTEP: {step:04d}\nPARENT: {step-1:04d}\nDISPOSITION: WAKE\nPROJECT: test-project\n\n{body}", ())
 
 
 def main() -> int:

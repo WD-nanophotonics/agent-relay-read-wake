@@ -1,19 +1,21 @@
 [account]
-address = "icywoods.1@gmail.com"
+address = ""
 
 [protocol]
-prefix = "[GMAIL-COURIER]"
-legacy_prefix = "[GC-BRIDGE]"
+prefix = "[AUTOMATION]"
+legacy_prefix = ""
 
 [[projects]]
-code = "GENERICCHESS"
-aliases = ["GC"]
-root = "C:/Users/icywo/PycharmProjects/GenericChess-chat"
-inbox = "coordination/inbox"
-branch = "chat"
+code = ""
+aliases = []
+root = ""
+# Omit inbox for <root>/inbox/<project-id>, or set a relative/absolute path.
+branch = ""
 remote = "origin"
-# remote_url = "https://github.com/your-org/your-repo.git"
-push = true
-legacy_prefixes = ["[GC-BRIDGE]"]
+push = false
+legacy_prefixes = []
+# Optional default ChatGPT conversation URL. A registered project URL takes precedence.
+chat_url = ""
 
-# Add one [[projects]] block per project. Project codes must be unique.
+# Replace the empty values with the caller's account and project settings.
+# Add one [[projects]] block per routed project. Codes must be unique.

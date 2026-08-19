@@ -7,7 +7,7 @@ import unittest
 from dataclasses import replace
 
 from agent_relay.config import RelayConfig
-from agent_relay.config import EXPECTED_CHAT_URL
+from agent_relay.config import DEFAULT_CHAT_URL
 from agent_relay.gmail import Attachment, GmailMessage
 from agent_relay.relay import NoopWorkerLauncher, Relay
 from agent_relay.storage import StateStore, stage_instruction
@@ -17,7 +17,7 @@ from agent_relay.protocol import ProtocolError, parse_envelope
 
 
 def envelope(step=1, parent=0, disposition="WAKE", run="RUN-TEST-001"):
-    return f"AGENTRELAY/1\n\nCHANNEL: AR-GMAILCOURIER-A1R7P\nRUN: {run}\nSTEP: {step:04d}\nPARENT: {parent:04d}\nDISPOSITION: {disposition}\nPROJECT: gmail-courier\n\nTask {step}"
+    return f"AGENTRELAY/1\n\nCHANNEL: AR-TEST-CHANNEL\nRUN: {run}\nSTEP: {step:04d}\nPARENT: {parent:04d}\nDISPOSITION: {disposition}\nPROJECT: test-project\n\nTask {step}"
 
 
 class FakeGmail:
@@ -46,7 +46,7 @@ class MinimalRelayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.cfg = RelayConfig("gmail-courier", "Gmail Courier", "AR-GMAILCOURIER-A1R7P", Path.cwd(), root / "storage", "mock", "", "mock", EXPECTED_CHAT_URL, 20, True, root)
+        self.cfg = RelayConfig("test-project", "Test Project", "AR-TEST-CHANNEL", Path.cwd(), root / "storage", "mock", "", "mock", DEFAULT_CHAT_URL, 20, True, root)
     def tearDown(self):
         self.tmp.cleanup()
     def msg(self, mid="m1", step=1, parent=0, disposition="WAKE", attachments=()):

@@ -94,6 +94,7 @@ class Relay:
             self.ledger.append("poll_skipped_owned_worker", worker_id=owner.get("worker_id"), claimed=bool(state.get("active_worker")))
             return PollResult("busy")
         if owner:
+            state["active_worker"] = None
             state["pending_worker"] = None
             state["mode"] = "IDLE"
             self.store.save(state)
