@@ -149,7 +149,7 @@ class CourierTests(unittest.TestCase):
             runtime = Path(tmp) / "runtime"
             payload = {
                 "headers": [
-                    {"name": "Subject", "value": "MePhC - ALPHA - TASK - R6.2 Research Field"},
+                    {"name": "Subject", "value": "External Audit - ALPHA - TASK - R6.2 Research Field"},
                     {"name": "From", "value": "me@example.com"},
                     {"name": "To", "value": "me@example.com"},
                 ],

@@ -459,8 +459,13 @@ def run_watchdog(config, *, run_id: str, after_step: int, poll_factory=None, sle
             _save_status(root, run_id, after_step, status)
         completed = poll_number
         reason = f"no_matching_wake_after_{completed}_polls" if max_polls is not None else "no_matching_wake_after_service_window"
-        status.update({"status": "NO_WAKE_FOUND", "polls_completed": completed, "last_poll_action": status.get("last_poll_action") or "IDLE", "service_window_remaining_seconds": 0, "closing_countdown_seconds": NO_WAKE_SHUTDOWN_SECONDS})
+        relay_mode = str(state_store.load().get("mode") or "IDLE")
+        # Exhausting this watchdog window is not permission to turn a durable
+        # v2 continuation into ordinary IDLE.  The next audit decision must
+        # still arrive through the control plane.  Keep the historical status
+        # name for dashboards and record the durable mode explicitly.
+        status.update({"status": "NO_WAKE_FOUND", "relay_mode": relay_mode, "awaiting_audit": relay_mode == "AWAITING_AUDIT", "polls_completed": completed, "last_poll_action": status.get("last_poll_action") or "IDLE", "service_window_remaining_seconds": 0, "closing_countdown_seconds": NO_WAKE_SHUTDOWN_SECONDS})
         _save_status(root, run_id, after_step, status)
-        _append(ledger, "watchdog_exhausted", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=completed, reason=reason)
+        _append(ledger, "watchdog_exhausted", run_id=run_id, after_step=after_step, watchdog_id=watchdog_id, pid=pid, poll_number=completed, reason=reason, relay_mode=relay_mode)
         _countdown(root, run_id, after_step, status, NO_WAKE_SHUTDOWN_SECONDS, sleep, clock)
         return _finish(status, root, run_id, after_step, ledger, watchdog_id, pid, "FINISHED", reason, return_value="exhausted")

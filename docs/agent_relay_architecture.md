@@ -79,3 +79,24 @@ remains an externally verified report; the next Gmail step must be authored and
 sent by the ChatGPT conversation, never by the background worker.
 
 No Phase 2 component may classify natural language to decide whether a message wakes an agent.
+
+## GmailCourier trusted transport v2
+
+The current Gmail/Worker/handoff path has a separate control plane from task
+payloads. `AGENTRELAY/1` remains a legacy transport wake. `AGENTRELAY/2`
+messages carry explicit message kind, source/target roles, authority class,
+decision identity, and work-order identity. Only an `AUDIT_DECISION` from the
+Auditor with `WORKFLOW_CONTROL` authority can dispatch a Worker. Its
+`decision.json` is strictly schema-checked against the mail envelope; an
+`EXECUTE` decision additionally requires one `work_order.md`. A Worker report
+is `EVIDENCE_ONLY`, and copied protocol-looking text in the report body is
+never parsed as control.
+
+The durable continuation states are `READY_TO_DISPATCH`, `DISPATCHING`,
+`BUSY`, and `AWAITING_AUDIT` in addition to terminal `STOPPED`. Dispatch
+intent, decision hash, work-order hash, owner, and post-completion obligation
+are written before launching. Same-content duplicates are idempotent;
+different content under the same decision or work-order ID fails closed. An
+uncertain crash boundary does not start a second Worker. Completion with
+`RETURN_FOR_AUDIT` remains durably `AWAITING_AUDIT` until a new structured
+decision arrives.

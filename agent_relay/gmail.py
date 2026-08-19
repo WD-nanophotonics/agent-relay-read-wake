@@ -50,11 +50,11 @@ class GoogleGmailGateway:
 
     def list_messages(self) -> list[str]:
         # Coarse candidate filter only. Exact protocol parsing below still
-        # validates CHANNEL/RUN/STEP/PARENT/DISPOSITION/PROJECT.
+        # validates the full v1/v2 control envelope and decision attachment.
         ids: list[str] = []
         token = None
         for _ in range(10):
-            params = {"userId": "me", "q": 'in:inbox {subject:"[AGENTRELAY]" subject:"AGENTRELAY/1"}', "maxResults": 100}
+            params = {"userId": "me", "q": 'in:inbox {subject:"[AGENTRELAY]" subject:"AGENTRELAY/1" subject:"AGENTRELAY/2"}', "maxResults": 100}
             if token:
                 params["pageToken"] = token
             response = self.service.users().messages().list(**params).execute(num_retries=0)

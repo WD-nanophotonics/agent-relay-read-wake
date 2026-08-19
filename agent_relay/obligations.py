@@ -25,7 +25,10 @@ def create_obligation(root: Path, *, worker_id: str, run_id: str, step: int, par
                      project_id: str, channel_id: str, repository: str,
                      chat_url: str, message_id: str | None = None,
                      content_hash: str | None = None, worker_pid: int | None = None,
-                     worker_exe: str | None = None) -> dict[str, Any]:
+                     worker_exe: str | None = None, decision_id: str | None = None,
+                     work_order_id: str | None = None, work_order_hash: str | None = None,
+                     post_completion: str | None = None,
+                     further_work_requires_new_decision: bool | None = None) -> dict[str, Any]:
     token = f"AR-HANDOFF-{worker_id}"
     value: dict[str, Any] = {
         "protocol": "AGENTRELAY_HANDOFF_OBLIGATION/1",
@@ -44,6 +47,11 @@ def create_obligation(root: Path, *, worker_id: str, run_id: str, step: int, par
         "exit_code": None,
         "message_id": message_id,
         "content_hash": content_hash,
+        "decision_id": decision_id,
+        "work_order_id": work_order_id,
+        "work_order_hash": work_order_hash,
+        "post_completion": post_completion,
+        "further_work_requires_new_decision": further_work_requires_new_decision,
         "worker_pid": worker_pid,
         "worker_exe": worker_exe,
         "created_at": now(),
@@ -169,7 +177,8 @@ def recover_pending_handoffs_once(config: Any, *, sender: Any | None = None) -> 
         state_store = StateStore(root)
         state = state_store.load()
         if isinstance(state.get("active_worker"), dict) and state["active_worker"].get("worker_id") == worker_id:
-            state.update({"active_worker": None, "mode": "IDLE"})
+            next_mode = "AWAITING_AUDIT" if value.get("work_order_id") else "IDLE"
+            state.update({"active_worker": None, "mode": next_mode})
             state_store.save(state)
             Ledger(root).append("stale_active_owner_cleared", worker_id=worker_id, pid=owner.get("pid"))
         if not value.get("report"):

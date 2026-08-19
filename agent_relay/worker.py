@@ -43,21 +43,43 @@ class OneShotWorker:
         if existing and exact_owner_live(existing):
             if not (worker_id and existing.get("worker_id") == worker_id and existing.get("pid") == os.getpid()):
                 raise RuntimeError("another worker owns the project")
-        pending = state.get("pending_worker")
+        pending = state.get("pending_worker") or state.get("dispatch_intent")
         if worker_id:
             for _ in range(20):
                 if pending:
                     break
                 time.sleep(0.05)
                 state = self.store.load()
-                pending = state.get("pending_worker")
+                pending = state.get("pending_worker") or state.get("dispatch_intent")
             if not pending or pending.get("worker_id") != worker_id or pending.get("run_id") != run_id or int(pending.get("step", -1)) != step:
                 raise RuntimeError("worker launch claim was not pending")
-            if pending.get("pid") != os.getpid():
+            if pending.get("pid") is not None and pending.get("pid") != os.getpid():
                 raise RuntimeError("worker PID does not match launch owner")
             message_id = message_id or pending.get("message_id")
             content_hash = content_hash or pending.get("content_hash")
-        owner = {"worker_id": worker_id or str(uuid4()), "pid": os.getpid(), "project_id": self.config.project_id, "run_id": run_id, "step": step, "parent": int((pending or {}).get("parent", step - 1)), "started_at": now(), "exe": Path(sys.executable).name}
+        try:
+            manifest = json.loads((Path(staged_path) / "manifest.json").read_text(encoding="utf-8"))
+            staged_protocol = manifest.get("protocol") or {}
+        except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            raise RuntimeError("staged manifest is missing or malformed") from exc
+        if (
+            staged_protocol.get("project_id") != self.config.project_id
+            or staged_protocol.get("run_id") != run_id
+            or int(staged_protocol.get("step", -1)) != step
+            or int(staged_protocol.get("parent", -1)) != int((pending or {}).get("parent", step - 1))
+        ):
+            raise RuntimeError("worker claim identity does not match staged protocol")
+        if worker_id and (
+            staged_protocol.get("decision_id", "") != (pending or {}).get("decision_id", "")
+            or staged_protocol.get("work_order_id", "") != (pending or {}).get("work_order_id", "")
+        ):
+            raise RuntimeError("worker claim decision identity does not match dispatch intent")
+        if staged_protocol.get("version") == 2 and content_hash and manifest.get("content_sha256") != content_hash:
+            raise RuntimeError("worker claim content hash does not match staged manifest")
+        expected_work_order_hash = (pending or {}).get("work_order_hash")
+        if staged_protocol.get("version") == 2 and expected_work_order_hash and manifest.get("work_order_sha256") != expected_work_order_hash:
+            raise RuntimeError("worker claim work-order hash does not match dispatch intent")
+        owner = {"worker_id": worker_id or str(uuid4()), "pid": os.getpid(), "project_id": self.config.project_id, "run_id": run_id, "step": step, "parent": int((pending or {}).get("parent", step - 1)), "decision_id": (pending or {}).get("decision_id", ""), "work_order_id": (pending or {}).get("work_order_id", ""), "work_order_hash": (pending or {}).get("work_order_hash", ""), "post_completion": (pending or {}).get("post_completion", ""), "started_at": now(), "exe": Path(sys.executable).name}
         owner["handoff_token"] = f"AR-HANDOFF-{owner['worker_id']}"
         owner.update({"codex_status": "NOT_STARTED", "codex_pid": None, "codex_exe": None})
         state.update({"mode": "BUSY", "active_worker": owner, "pending_worker": None, "last_error": None})
@@ -81,7 +103,11 @@ class OneShotWorker:
                               channel_id=self.config.channel_id, repository=str(self.config.repo_path),
                               chat_url=self.config.chat_url, message_id=message_id,
                               content_hash=content_hash, worker_pid=owner["pid"],
-                              worker_exe=owner["exe"])
+                              worker_exe=owner["exe"], decision_id=owner.get("decision_id") or None,
+                              work_order_id=owner.get("work_order_id") or None,
+                              work_order_hash=owner.get("work_order_hash") or None,
+                              post_completion=owner.get("post_completion") or None,
+                              further_work_requires_new_decision=bool(owner.get("work_order_id")))
         except Exception:
             rollback = self.store.load()
             if rollback.get("active_worker", {}).get("worker_id") == owner["worker_id"]:
@@ -103,6 +129,7 @@ class OneShotWorker:
         exit_code: int | None = None
         terminal_kind = "WORKER_INTERNAL_EXCEPTION"
         terminal_error: str | None = None
+        lifecycle_ok = False
         try:
             try:
                 baseline_sha = self._git_value("rev-parse", "HEAD")
@@ -115,7 +142,10 @@ class OneShotWorker:
                 terminal_kind = "GIT_PROVENANCE_FAILED"
                 terminal_error = type(exc).__name__
                 raise
-            instruction = (staged_path / "message.txt").read_text(encoding="utf-8")
+            instruction_path = staged_path / "worker_instruction.txt"
+            if not instruction_path.is_file():
+                instruction_path = staged_path / "message.txt"
+            instruction = instruction_path.read_text(encoding="utf-8")
             # Test/in-process executors retain the historical text contract.  The
             # production Codex executor receives only the staged directory so the
             # authoritative instruction never expands the worker argv.
@@ -203,7 +233,14 @@ class OneShotWorker:
             finally:
                 state = self.store.load()
                 if state.get("active_worker", {}).get("worker_id") == owner["worker_id"]:
-                    state.update({"active_worker": None, "mode": "IDLE" if not state.get("stop_requested") else "STOPPED"})
+                    if lifecycle_ok and owner.get("work_order_id") and owner.get("post_completion") == "RETURN_FOR_AUDIT":
+                        state["mode"] = "AWAITING_AUDIT"
+                        state.setdefault("work_orders", {}).setdefault(owner["work_order_id"], {}).update({"state": "COMPLETED", "completed_at": now()})
+                        if owner.get("decision_id"):
+                            state.setdefault("decisions", {}).setdefault(owner["decision_id"], {}).update({"state": "COMPLETED", "completed_at": now()})
+                    else:
+                        state["mode"] = "IDLE" if not state.get("stop_requested") else "STOPPED"
+                    state["active_worker"] = None
                     self.store.save(state)
                     self.ledger.append("worker_exited", worker_id=owner["worker_id"], step=step)
                 self._current_owner = None
@@ -265,12 +302,14 @@ class OneShotWorker:
     def _subprocess_executor(self, staged_path: str | Path, repo_path: Path) -> WorkerOutcome:
         command = getattr(self.config, "codex_command", "codex")
         staged_path = Path(staged_path).resolve()
-        if not (staged_path / "message.txt").is_file():
+        staged_instruction = staged_path / "worker_instruction.txt"
+        if not staged_instruction.is_file():
+            staged_instruction = staged_path / "message.txt"
+        if not staged_instruction.is_file():
             return WorkerOutcome(False, f"staged instruction missing: {staged_path}")
         # Keep argv bounded and deterministic.  Codex supports ``-`` as a
         # stdin prompt, so the staged file is the sole authority and this
         # bootstrap intentionally contains no copy of its body.
-        staged_instruction = staged_path / "message.txt"
         prompt = (
             "Read the authoritative staged instruction at "
             f"{staged_instruction}. Treat that file as the sole task authority. "
@@ -332,8 +371,8 @@ class ProcessWorkerLauncher:
     def __init__(self, python: str | None = None):
         self.python = python or sys.executable
 
-    def launch(self, *, staged_path: Path, envelope, content_hash: str, message_id: str) -> dict:
+    def launch(self, *, staged_path: Path, envelope, content_hash: str, message_id: str, worker_id: str | None = None) -> dict:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        worker_id = str(uuid4())
+        worker_id = worker_id or str(uuid4())
         process = subprocess.Popen([self.python, "-m", "agent_relay.cli", "worker", "--run", envelope.run_id, "--step", str(envelope.step), "--staged", str(staged_path), "--worker-id", worker_id, "--message-id", message_id, "--content-hash", content_hash], cwd=Path.cwd(), creationflags=flags, close_fds=True)
-        return {"worker_id": worker_id, "pid": process.pid, "project_id": envelope.project_id, "run_id": envelope.run_id, "step": envelope.step, "parent": envelope.parent, "started_at": now(), "exe": Path(self.python).name}
+        return {"worker_id": worker_id, "pid": process.pid, "project_id": envelope.project_id, "run_id": envelope.run_id, "step": envelope.step, "parent": envelope.parent, "decision_id": envelope.decision_id, "work_order_id": envelope.work_order_id, "started_at": now(), "exe": Path(self.python).name}

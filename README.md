@@ -13,7 +13,7 @@ Python Gmail poll-once
 
 “AI 永不等待，软件等待”。`poll-once` 只执行一个 Gmail fetch cycle，不 sleep、不循环、不通过 Codex Gmail integration 读取邮件。已有活动的精确 Worker owner 会使本次调用无操作；旧步骤忽略，未来有效步骤暂缓且不消费，同一 logical step 的不同哈希 fail closed。`NO_ACTION` 只推进协议序号，`WAKE` 才暂存并启动 Worker，`HUMAN_REQUIRED` 不启动 Worker。
 
-持久化只有 `IDLE`、`BUSY`、`STOPPED` 三种模式，以及 run/expected step/parent、已消费 Gmail ID、logical hash、停止标记和精确 pending/active-worker owner。进程启动先记录 pending owner；Worker 精确认领并原子确认后才消费 Gmail ID、推进 expected step。Worker 在认领前死亡时，下一次 `poll-once` 清理 pending owner 并重试，步骤不会丢失。状态 JSON 原子替换，账本为追加 JSONL；inbox 暂存先写临时目录再原子发布。Gmail 默认落在 `<project-root>/inbox/<canonical-project-id>`；调用方也可以配置相对或绝对 inbox。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\<project-id>`，不进入 Git。
+持久化使用 `IDLE`、`READY_TO_DISPATCH`、`DISPATCHING`、`BUSY`、`AWAITING_AUDIT` 和 `STOPPED`，以及 run/expected step/parent、已消费 Gmail ID、logical hash、停止标记、decision/work-order 记录、dispatch intent 和精确 pending/active-worker owner。合法 v2 `AUDIT_DECISION` 在派发前先持久化；Worker 精确认领并原子确认后才消费 Gmail ID、推进 expected step。授权 work order 完成后进入 `AWAITING_AUDIT`，不会被当作普通 idle。相同内容的重复 decision 不重复派发，哈希冲突 fail closed，崩溃后的不确定状态不会自动创建第二个 Worker。状态 JSON 原子替换，账本为追加 JSONL；inbox 暂存先写临时目录再原子发布。Gmail 默认落在 `<project-root>/inbox/<canonical-project-id>`；调用方也可以配置相对或绝对 inbox。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\<project-id>`，不进入 Git。
 
 ## 命令
 
@@ -72,6 +72,18 @@ ChatGPT URL 可以通过 `gmail-courier register-chat-url --project-id <project-
 
 `watchdog-ui` 是只读 Tkinter 监视器：它读取 `watchdogs/<RUN>-after-<STEP>.json`、状态快照和 JSONL 账本，显示启动确认、存活 PID、当前尝试、下一次 poll 倒计时、最近结果和终止原因。它不读取 Gmail、不启动 Worker，也不影响 watchdog；关闭窗口不会停止后台 watchdog。没有记录时会显示 `NO ACTIVE WATCHDOG`。
 
+## AgentRelay protocol v2
+
+`AGENTRELAY/1` remains available for legacy wake routing. New continuation
+control requires `AGENTRELAY/2`: an `AUDIT_DECISION` envelope plus exactly one
+`decision.json`, and an exact `work_order.md` for `action=EXECUTE`. Worker
+reports are evidence only. Natural-language control words in a report or
+email body are not scanned for commands. The machine checks roles, authority,
+identity, hashes, attachment cardinality, and durable state before launching a
+Worker. The supported v2 stages are `READY_TO_DISPATCH`, `DISPATCHING`,
+`BUSY`, and `AWAITING_AUDIT`; a new valid audit decision is required for every
+continuation.
+
 ## 安全边界
 
 新协议仍严格要求 `AGENTRELAY/1`、`CHANNEL`、`RUN`、`STEP`、`PARENT`、`DISPOSITION`、`PROJECT`。只接受运行时配置的项目和频道；不会内置任何具体项目、仓库、邮箱或会话标识。OAuth/token、inbox、state、logs 和 handoff 运行时目录均被忽略；日志不写入凭据。
@@ -96,6 +108,7 @@ or duplicate ownership.
 
 ```powershell
 python -m compileall -q agent_relay gmail_courier
+python -m unittest tests.test_protocol_v2 tests.test_workflow_stages
 python tools/certify_minimal_closure.py
 python tools/certify_local_controller_loop.py
 python tests/test_minimal_relay.py
