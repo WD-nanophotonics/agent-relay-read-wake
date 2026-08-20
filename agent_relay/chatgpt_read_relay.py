@@ -201,6 +201,13 @@ def read_url_matches(page_url: str, configured_url: str) -> bool:
     return left == right
 
 
+def _is_canonical_conversation_url(value: str) -> bool:
+    if not is_chat_read_url(value):
+        return False
+    parts = [part for part in urlsplit(value).path.split("/") if part]
+    return parts[0] == "c"
+
+
 @dataclass(frozen=True)
 class AssistantMessage:
     identity: str
@@ -276,6 +283,20 @@ class ChatGPTDOMReader:
         message_id = message.get_attribute("data-message-id")
         identity = message_id or "dom-text:" + hashlib.sha256(second.encode("utf-8")).hexdigest()
         return AssistantMessage(identity, second, str(self.page.url))
+
+
+def _assistant_edge_hashes(page: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return constant-size visible anchors for share-to-/c/ linkage."""
+    try:
+        messages = page.locator(ChatGPTDOMReader.ASSISTANT_MESSAGES)
+        texts = []
+        for index in range(messages.count()):
+            text = messages.nth(index).inner_text(timeout=5000)
+            if text.strip():
+                texts.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
+        return tuple(texts[:2]), tuple(texts[-2:])
+    except Exception:
+        return (), ()
 
 
 def _state_path(root: Path) -> Path:
@@ -379,6 +400,44 @@ class ChatGPTReadRelay:
         from .chatgpt_sender import BrowserChatGPTSender
         return BrowserChatGPTSender(type("Config", (), {"chat_url": self.chat_url})())
 
+    def _select_page(self, context: Any) -> Any:
+        pages = list(context.pages)
+        direct = [page for page in pages if read_url_matches(page.url, self.chat_url)]
+        if not direct:
+            raise ChatReadError("configured ChatGPT conversation is not open")
+        selected = direct[0]
+        configured_parts = [part for part in urlsplit(self.chat_url).path.split("/") if part]
+        if configured_parts[0] != "share":
+            if len(direct) > 1:
+                raise ChatReadError("multiple pages match configured conversation")
+            return selected
+        # A writable share copy can open a canonical /c/ page after a prompt is
+        # submitted. Link it only with the page title and a two-message
+        # content overlap; arbitrary /c/ tabs are never accepted.
+        share_page = selected
+        try:
+            share_title = share_page.title()
+        except Exception:
+            share_title = ""
+        _share_head, share_tail = _assistant_edge_hashes(share_page)
+        candidates = []
+        for page in pages:
+            if not _is_canonical_conversation_url(page.url):
+                continue
+            try:
+                title_matches = bool(share_title) and page.title() == share_title
+            except Exception:
+                title_matches = False
+            candidate_head, _candidate_tail = _assistant_edge_hashes(page)
+            overlap = bool(share_tail and candidate_head and share_tail == candidate_head)
+            if len(share_tail) == 1 and len(candidate_head) == 1:
+                overlap = share_tail == candidate_head
+            if title_matches and overlap:
+                candidates.append(page)
+        if len(candidates) > 1:
+            raise ChatReadError("multiple canonical pages match the configured share conversation")
+        return candidates[0] if candidates else selected
+
     def read_once(self) -> ReadResult:
         sender = self._sender()
         opened_page = None
@@ -390,8 +449,11 @@ class ChatGPTReadRelay:
                 context = browser.contexts[0] if browser.contexts else None
                 if context is None:
                     raise ChatReadError("Chrome CDP has no browser context")
-                page = next((item for item in context.pages if read_url_matches(item.url, self.chat_url)), None)
-                if page is None:
+                try:
+                    page = self._select_page(context)
+                except ChatReadError as exc:
+                    if "not open" not in str(exc):
+                        raise
                     page = context.new_page()
                     opened_page = page
                     page.goto(self.chat_url, wait_until="domcontentloaded", timeout=120000)
