@@ -222,6 +222,29 @@ authority and that only a structured `AUDIT_DECISION` can control continuation.
 
 ## What the relay does
 
+### ChatGPT assistant-to-local read transport
+
+The optional read-only command is:
+
+```text
+python -m agent_relay.chatgpt_read_relay --root <local-root> --project-id <project-id> --chat-url <chat-url>
+```
+
+It attaches to or starts the bounded Chrome/CDP profile, verifies a configured `/c/<id>` or `/share/<id>` URL, and inspects only the newest rendered assistant message. Completion requires non-empty visible text, no recognized streaming/stop signal, and identical text across a short stability interval. A normal assistant reply is not a work order. Only this exact structure is accepted:
+
+```text
+AGENTRELAY_OUTBOUND/1
+PROJECT_ID=<project_id>
+WORK_ORDER_ID=<unique_id>
+ACTION=<action>
+PAYLOAD_SHA256=<sha256 of canonical JSON>
+BEGIN_PAYLOAD
+<UTF-8 JSON object>
+END_PAYLOAD
+```
+
+Canonical JSON uses UTF-8, sorted object keys, compact `,` and `:` separators, no non-standard JSON constants, and no duplicate object keys. The hash is SHA-256 of those canonical UTF-8 bytes. Prose outside the envelope is never executed. Accepted payloads are exposed under `inbox/chatgpt/` and durably recorded in `chatgpt/outbound_receipts.json`; the same work-order ID is a duplicate, while changed content for an existing ID is rejected. This path is read-only and does not replace Gmail or modify ChatGPT login state.
+
 1. It can submit an English/ASCII prompt to a ChatGPT web conversation through
    a Python-controlled Chrome/CDP session. It first reuses a verified existing
    target conversation and starts Chrome only when the dedicated profile is
