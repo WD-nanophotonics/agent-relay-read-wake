@@ -41,6 +41,7 @@ def main(argv=None) -> int:
     parser.add_argument("--chat-url")
     parser.add_argument("--read-root")
     parser.add_argument("--project-id")
+    parser.add_argument("--work-order-id")
     parser.add_argument("--display-name")
     parser.add_argument("--channel-id")
     parser.add_argument("--repo-path")
@@ -80,6 +81,7 @@ def main(argv=None) -> int:
             "--root", args.read_root or str(home / "chatgpt"),
             "--project-id", args.project_id,
             "--chat-url", args.chat_url,
+            *( ["--work-order-id", args.work_order_id] if args.work_order_id else [] ),
         ])
     config = load_config(home)
     store = StateStore(config.local_project_storage)

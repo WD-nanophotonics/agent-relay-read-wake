@@ -11,7 +11,7 @@ The official workflow is now:
 
 ```text
 local Agent -> gmail-courier chat-send-read -> fixed ChatGPT conversation
-           -> agent-relay chat-read-once -> local inbox/chatgpt work order
+           -> wait/probe completed assistant response -> local inbox/chatgpt work order
 ```
 
 The Gmail receive path is archived compatibility functionality. It remains
@@ -23,11 +23,11 @@ Read this file before calling the transport. This component is a bounded
 message relay for an Agent workflow. It does not know what the Agent's
 business task is and it does not decide what the Agent should do next.
 
-The intended use is a closed loop:
+The intended Chat-only use is a closed loop:
 
 ```text
-local Agent -> Python sender -> one ChatGPT conversation -> Gmail response
-           <- gmail_received event + isolated local inbox <---------------
+local Agent -> Python sender -> one ChatGPT conversation
+           <- completed assistant work order + isolated local inbox
 ```
 
 Use this Python courier as the normal transport for this loop. In particular,
@@ -39,9 +39,10 @@ exceptional, separately recorded investigation; it is not evidence that this
 workflow succeeded.
 
 The courier is a transport, not a business Agent. It sends the caller's
-English prompt, waits within explicit bounds, identifies the response, writes
-the files, and emits events. The calling Agent remains responsible for
-interpreting or executing the instruction in the response.
+English prompt, keeps the same Chat page open, probes until the assistant
+response is complete within explicit bounds, validates and writes the work
+order, and emits events. The calling Agent remains responsible for interpreting
+or executing the instruction in the response.
 
 ## Timing contract
 
@@ -126,6 +127,68 @@ Recommended Agent-side deadline: 420 seconds or more
 The relay refuses to submit when a required identity, path, URL, encoding, or
 target field fails validation. Fix the preparation/configuration first; never
 silently substitute a default project, inbox, account, URL, or task answer.
+
+## Optional task and instruction preferences
+
+The official `chat-send-read` command accepts two independent optional
+preferences. Both default to `normal` and neither changes the wait window or
+the structured `AGENTRELAY_OUTBOUND/2` response envelope:
+
+```powershell
+Get-Content .\message.txt | gmail-courier chat-send-read `
+  --url <chat-url> --project-id <project-id> --work-order-id <unique-id> `
+  --task-difficulty normal|hard|challenge `
+  --instruction-level normal|detailed|manual_book
+```
+
+`hard` asks for a somewhat more difficult task; `challenge` asks for a
+challenging, long-span, highly complex, highly specialized task. `detailed`
+asks for a clearer next-step work order; `manual_book` asks for an explicit
+plan, concrete rules, and pseudocode where useful. These are requests from the
+local Agent only. ChatGPT retains final authority and may choose a simpler
+task or instruction level. `normal` adds no preference text.
+
+The file-backed official operation is `operation="chat-send-read"` and must
+contain a unique `work_order_id`; the two fields are optional and default to
+`normal` in `request.json`. The archived `operation="chat-send"` remains
+compatible, but rejects non-normal mode values rather than ignoring them.
+The mode values are recorded in events and `receipt.json` for diagnosis. They
+do not automatically extend `workflow_window_seconds`; the Agent must set a
+longer window explicitly when needed.
+
+### ChatGPT assistant-to-local read transport
+
+The official return path uses `AGENTRELAY_OUTBOUND/2`:
+
+```text
+AGENTRELAY_OUTBOUND/2
+PROJECT_ID=<project_id>
+WORK_ORDER_ID=<unique_id>
+ACTION=<action>
+BEGIN_PAYLOAD
+<strict UTF-8 JSON object>
+END_PAYLOAD
+```
+
+ChatGPT is not asked to calculate a cryptographic digest. Python validates the
+project and work-order identity, strict JSON structure, completion state, and
+replay state. If `--work-order-id` is supplied and the newest completed reply
+is missing the envelope or uses the wrong identity, Python makes at most one
+mechanical correction request. A second failure emits `chat_repair_failed`.
+Legacy `AGENTRELAY_OUTBOUND/1` envelopes with a valid `PAYLOAD_SHA256` remain
+readable for compatibility. The Courier-owned Chat page is closed on success
+and failure; unrelated user Chrome processes are not terminated.
+
+Before Playwright attaches, Courier checks both the local CDP HTTP metadata and
+the DevTools WebSocket handshake. A port whose JSON endpoint answers but whose
+WebSocket is stale is treated as unhealthy, and Playwright attachment is
+bounded by a 15-second timeout. If a send is not visibly confirmed, Courier
+clears the composer and closes the exact configured conversation page. It does
+not terminate an external Chrome process that it attached to.
+`chat_submitted` is emitted only when the payload appears in a rendered Chat
+user-message node; text that remains only in the composer or generic page text
+does not count. Registered `/g/.../c/...` URLs are accepted as conversation
+URLs and are matched by their `/c/<id>` identity.
 
 ## Recommended capability selection
 
@@ -506,6 +569,13 @@ nonzero exit code.
 
 - Use `chat-send` when the caller only needs to send a prompt and does not need
   this process to wait for Gmail.
+- Use `chat-send-read` for the official Chat-only closed loop. It keeps one
+  browser/CDP attachment and the same Chat page open after the user turn is
+  confirmed, probes every two seconds for the completed expected assistant
+  work order, persists it, and closes the exact page on receipt, timeout, or
+  error. File requests record `submission_started` before external control
+  begins and `waiting_for_assistant` before this bounded receive phase. The
+  caller must keep this process alive for its configured workflow window.
 - Use `chat-send-request` when the caller wants the file-based outbox protocol
   and a machine-readable `receipt.json`.
 - Use `chat-test` for the complete send → wait → receive loop.

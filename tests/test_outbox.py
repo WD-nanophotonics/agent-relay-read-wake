@@ -5,8 +5,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from gmail_courier.outbox import load_request, write_receipt
-from gmail_courier.protocol import append_correlation_instruction, build_automated_prompt
+from gmail_courier.outbox import RequestValidationError, load_request, write_receipt
+from gmail_courier.protocol import (
+    append_correlation_instruction,
+    build_automated_prompt,
+    build_chat_read_prompt,
+)
 
 
 class OutboxRequestTests(unittest.TestCase):
@@ -46,6 +50,77 @@ class OutboxRequestTests(unittest.TestCase):
             payload.pop("workflow_window_seconds")
             (root / "request.json").write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(load_request(root).workflow_window_seconds, 360)
+
+    def test_chat_send_read_requires_work_order_and_loads_both_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_request(
+                root,
+                operation="chat-send-read",
+                work_order_id="WO-20260820-001",
+                task_difficulty="hard",
+                instruction_level="manual_book",
+            )
+            request = load_request(root)
+            self.assertEqual(request.operation, "chat-send-read")
+            self.assertEqual(request.work_order_id, "WO-20260820-001")
+            self.assertEqual(request.task_difficulty, "hard")
+            self.assertEqual(request.instruction_level, "manual_book")
+
+            payload = json.loads((root / "request.json").read_text(encoding="utf-8"))
+            payload.pop("work_order_id")
+            (root / "request.json").write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RequestValidationError, "work_order_id"):
+                load_request(root)
+
+    def test_legacy_chat_send_rejects_non_normal_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_request(root, task_difficulty="hard")
+            with self.assertRaisesRegex(RequestValidationError, "require operation chat-send-read"):
+                load_request(root)
+
+    def test_chat_read_prompt_keeps_modes_outside_quoted_agent_payload(self):
+        agent_text = "Project FACT-42 path=C:\\work\\repo sha=9f3a21c STOP"
+        prompt = build_chat_read_prompt(
+            agent_text,
+            project_id="PROJECT-001",
+            work_order_id="WO-001",
+            task_difficulty="challenge",
+            instruction_level="manual_book",
+        )
+        quoted = prompt.split("--- BEGIN QUOTED LOCAL AGENT REQUEST ---\n", 1)[1].split(
+            "\n--- END QUOTED LOCAL AGENT REQUEST ---", 1
+        )[0]
+        self.assertEqual(quoted, agent_text)
+        self.assertIn("challenging, long-span, highly complex", prompt)
+        self.assertIn("manual-book-level work order", prompt)
+        self.assertLess(prompt.index("challenging, long-span"), prompt.index("manual-book-level"))
+        self.assertTrue(prompt.isascii())
+
+    def test_normal_chat_read_prompt_has_no_mode_preference(self):
+        prompt = build_chat_read_prompt("Agent request.", project_id="PROJECT-001", work_order_id="WO-001")
+        for phrase in ("somewhat more difficult", "challenging, long-span", "more detailed work order", "manual-book-level"):
+            self.assertNotIn(phrase, prompt)
+
+    def test_each_non_normal_mode_only_adds_its_own_preference(self):
+        cases = (
+            ("hard", "task_difficulty", "somewhat more difficult task", "more detailed work order"),
+            ("challenge", "task_difficulty", "challenging, long-span", "manual-book-level work order"),
+            ("detailed", "instruction_level", "more detailed work order", "somewhat more difficult task"),
+            ("manual_book", "instruction_level", "manual-book-level work order", "more detailed work order"),
+        )
+        for value, dimension, present, absent in cases:
+            kwargs = {dimension: value}
+            prompt = build_chat_read_prompt("Agent request.", project_id="PROJECT-001", work_order_id="WO-001", **kwargs)
+            self.assertIn(present, prompt)
+            self.assertNotIn(absent, prompt)
+
+    def test_chat_read_prompt_rejects_invalid_modes_before_sender(self):
+        with self.assertRaisesRegex(ValueError, "task_difficulty"):
+            build_chat_read_prompt("Agent request.", project_id="PROJECT-001", work_order_id="WO-001", task_difficulty="extreme")
+        with self.assertRaisesRegex(ValueError, "instruction_level"):
+            build_chat_read_prompt("Agent request.", project_id="PROJECT-001", work_order_id="WO-001", instruction_level="verbose")
 
     def test_rejects_non_ascii_message_and_missing_ready(self):
         with tempfile.TemporaryDirectory() as tmp:

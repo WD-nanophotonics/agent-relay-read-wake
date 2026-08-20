@@ -79,18 +79,23 @@ def capture_latest_assistant_turn(root: Path) -> ChatGPTTurn | None:
     """
     config = _bridge_config(root)
     from .chatgpt_sender import BrowserChatGPTSender
-    sender = BrowserChatGPTSender(type("Config", (), {"chat_url": config["chat_url"]})())
+    sender = BrowserChatGPTSender(type("Config", (), {"chat_url": config["chat_url"], "close_session_page": True})())
+    session_page = None
     try:
         from playwright.sync_api import sync_playwright
         sender._launch()
         with sync_playwright() as playwright:
-            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{sender.debug_port}")
+            browser = playwright.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{sender.debug_port}",
+                timeout=getattr(sender, "cdp_connect_timeout_ms", 15000),
+            )
             context = browser.contexts[0] if browser.contexts else None
             if context is None:
                 raise RuntimeError("Chrome CDP has no browser context")
             page = next((item for item in context.pages if chat_urls_match(item.url, sender.url)), None)
             if page is None:
                 raise RuntimeError("configured ChatGPT conversation is not open")
+            session_page = page
             messages = page.locator("[data-message-author-role='assistant']")
             count = messages.count()
             if not count:
@@ -104,6 +109,15 @@ def capture_latest_assistant_turn(root: Path) -> ChatGPTTurn | None:
             identity = message_id or f"surrogate:{page.url}:{count}:{digest}"
             return ChatGPTTurn(identity, text)
     finally:
+        if getattr(sender, "close_session_page", False):
+            try:
+                close_page = getattr(sender, "_close_session_page", None)
+                if callable(close_page):
+                    close_page(session_page)
+                elif session_page is not None:
+                    session_page.close()
+            except Exception:
+                pass
         if sender.owned_process is not None:
             try:
                 sender.owned_process.terminate(); sender.owned_process.wait(timeout=5)

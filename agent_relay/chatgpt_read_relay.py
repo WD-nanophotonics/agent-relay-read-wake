@@ -20,11 +20,13 @@ import time
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from .config import chat_urls_match
+from .config import chat_urls_match, is_chat_url
 from .storage import atomic_json
+from gmail_courier.protocol import build_chat_read_correction_prompt
 
 
-PROTOCOL = "AGENTRELAY_OUTBOUND/1"
+PROTOCOL = "AGENTRELAY_OUTBOUND/2"
+LEGACY_PROTOCOL = "AGENTRELAY_OUTBOUND/1"
 BEGIN_PAYLOAD = "BEGIN_PAYLOAD"
 END_PAYLOAD = "END_PAYLOAD"
 PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -93,6 +95,7 @@ class OutboundEnvelope:
     payload: dict[str, Any]
     canonical_payload: str
     raw_envelope: str
+    protocol: str = PROTOCOL
 
 
 def parse_outbound_envelope(text: str, *, project_id: str) -> OutboundEnvelope | None:
@@ -107,8 +110,9 @@ def parse_outbound_envelope(text: str, *, project_id: str) -> OutboundEnvelope |
     if not isinstance(project_id, str) or not PROJECT_RE.fullmatch(project_id):
         raise ChatReadError("configured project_id is invalid")
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    marker_indexes = [index for index, line in enumerate(lines) if line == PROTOCOL]
-    unsupported_markers = [line for line in lines if line.startswith("AGENTRELAY_OUTBOUND/") and line != PROTOCOL]
+    supported = {PROTOCOL, LEGACY_PROTOCOL}
+    marker_indexes = [index for index, line in enumerate(lines) if line in supported]
+    unsupported_markers = [line for line in lines if line.startswith("AGENTRELAY_OUTBOUND/") and line not in supported]
     if unsupported_markers:
         raise ChatReadError("unsupported outbound envelope version")
     if not marker_indexes:
@@ -116,9 +120,13 @@ def parse_outbound_envelope(text: str, *, project_id: str) -> OutboundEnvelope |
     if len(marker_indexes) != 1:
         raise ChatReadError("multiple outbound envelope markers")
     start = marker_indexes[0]
-    if start + 6 >= len(lines):
+    protocol = lines[start]
+    expected_fields = ("PROJECT_ID", "WORK_ORDER_ID", "ACTION")
+    if protocol == LEGACY_PROTOCOL:
+        expected_fields += ("PAYLOAD_SHA256",)
+    begin_index = start + 1 + len(expected_fields)
+    if begin_index >= len(lines):
         raise ChatReadError("incomplete outbound envelope")
-    expected_fields = ("PROJECT_ID", "WORK_ORDER_ID", "ACTION", "PAYLOAD_SHA256")
     values: dict[str, str] = {}
     for offset, name in enumerate(expected_fields, start=1):
         line = lines[start + offset]
@@ -129,7 +137,6 @@ def parse_outbound_envelope(text: str, *, project_id: str) -> OutboundEnvelope |
         if not value or "\n" in value:
             raise ChatReadError(f"empty or malformed {name}")
         values[name] = value
-    begin_index = start + 5
     if lines[begin_index] != BEGIN_PAYLOAD:
         raise ChatReadError("missing BEGIN_PAYLOAD")
     try:
@@ -147,7 +154,7 @@ def parse_outbound_envelope(text: str, *, project_id: str) -> OutboundEnvelope |
         raise ChatReadError("invalid WORK_ORDER_ID")
     if not ACTION_RE.fullmatch(values["ACTION"]):
         raise ChatReadError("invalid ACTION")
-    if not SHA256_RE.fullmatch(values["PAYLOAD_SHA256"]):
+    if protocol == LEGACY_PROTOCOL and not SHA256_RE.fullmatch(values["PAYLOAD_SHA256"]):
         raise ChatReadError("invalid PAYLOAD_SHA256")
     try:
         payload = json.loads(
@@ -160,23 +167,29 @@ def parse_outbound_envelope(text: str, *, project_id: str) -> OutboundEnvelope |
     if not isinstance(payload, dict):
         raise ChatReadError("payload must be a JSON object")
     canonical = canonical_payload(payload)
-    actual_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    if actual_hash != values["PAYLOAD_SHA256"]:
+    actual_hash = payload_sha256(payload)
+    if protocol == LEGACY_PROTOCOL and actual_hash != values["PAYLOAD_SHA256"]:
         raise ChatReadError("PAYLOAD_SHA256 does not match canonical payload")
     raw = "\n".join(lines[start:end_index + 1])
     return OutboundEnvelope(
         values["PROJECT_ID"],
         values["WORK_ORDER_ID"],
         values["ACTION"],
-        values["PAYLOAD_SHA256"],
+        actual_hash,
         payload,
         canonical,
         raw,
+        protocol,
     )
 
 
 def is_chat_read_url(value: str) -> bool:
     """Accept normal conversation URLs and share URLs for read-only use."""
+    # Registered project conversations may use /g/<project>/c/<id>; the
+    # conversation identity is still the /c/<id> component and is supported
+    # by the sender and URL registry.
+    if is_chat_url(value):
+        return True
     try:
         parsed = urlsplit(str(value))
     except ValueError:
@@ -339,7 +352,12 @@ def consume_once(root: Path, message: AssistantMessage, envelope: OutboundEnvelo
     if existing is not None:
         if existing.get("payload_sha256") != envelope.payload_sha256:
             raise ChatReadReplayConflict("work-order ID was reused with changed payload")
-        return ReadResult("chat_work_order_duplicate", "work order was already consumed", message_identity=message.identity)
+        return ReadResult(
+            "chat_work_order_duplicate",
+            "work order was already consumed",
+            envelope=envelope,
+            message_identity=message.identity,
+        )
     recovered = _find_existing_work_order(root, envelope.work_order_id)
     if recovered is not None:
         if recovered.get("payload_sha256") != envelope.payload_sha256:
@@ -360,7 +378,7 @@ def consume_once(root: Path, message: AssistantMessage, envelope: OutboundEnvelo
         (temp / "assistant_message.txt").write_text(message.text, encoding="utf-8", newline="\n")
         atomic_json(temp / "manifest.json", {
             "transport": "chatgpt_dom_read",
-            "protocol": PROTOCOL,
+            "protocol": envelope.protocol,
             "project_id": envelope.project_id,
             "work_order_id": envelope.work_order_id,
             "action": envelope.action,
@@ -383,7 +401,7 @@ def consume_once(root: Path, message: AssistantMessage, envelope: OutboundEnvelo
 
 
 class ChatGPTReadRelay:
-    def __init__(self, *, root: Path, project_id: str, chat_url: str, stability_wait_seconds: float = 0.35, sender_factory: Callable[[str], Any] | None = None):
+    def __init__(self, *, root: Path, project_id: str, chat_url: str, work_order_id: str | None = None, stability_wait_seconds: float = 0.35, sender_factory: Callable[[str], Any] | None = None, close_session_page: bool = True):
         if not is_chat_read_url(chat_url):
             raise ChatReadError("chat_url must be an HTTPS /c/<id> or /share/<id> URL")
         if not PROJECT_RE.fullmatch(project_id):
@@ -391,14 +409,22 @@ class ChatGPTReadRelay:
         self.root = root.resolve()
         self.project_id = project_id
         self.chat_url = chat_url
+        if work_order_id is not None and not WORK_ORDER_RE.fullmatch(work_order_id):
+            raise ChatReadError("work_order_id is invalid")
+        self.work_order_id = work_order_id
         self.stability_wait_seconds = stability_wait_seconds
         self.sender_factory = sender_factory
+        self.close_session_page = close_session_page
+        self._last_debug_port: int | None = None
 
     def _sender(self) -> Any:
         if self.sender_factory is not None:
-            return self.sender_factory(self.chat_url)
+            sender = self.sender_factory(self.chat_url)
+            if hasattr(sender, "close_session_page"):
+                sender.close_session_page = self.close_session_page
+            return sender
         from .chatgpt_sender import BrowserChatGPTSender
-        return BrowserChatGPTSender(type("Config", (), {"chat_url": self.chat_url})())
+        return BrowserChatGPTSender(type("Config", (), {"chat_url": self.chat_url, "close_session_page": self.close_session_page})())
 
     def _select_page(self, context: Any) -> Any:
         pages = list(context.pages)
@@ -438,14 +464,27 @@ class ChatGPTReadRelay:
             raise ChatReadError("multiple canonical pages match the configured share conversation")
         return candidates[0] if candidates else selected
 
-    def read_once(self) -> ReadResult:
+    @staticmethod
+    def _close_page(page: Any | None) -> None:
+        if page is None:
+            return
+        try:
+            page.close()
+        except Exception:
+            pass
+
+    def _read_once_without_correction(self) -> ReadResult:
         sender = self._sender()
-        opened_page = None
+        session_page = None
         try:
             from playwright.sync_api import sync_playwright
             sender._launch()
+            self._last_debug_port = sender.debug_port
             with sync_playwright() as playwright:
-                browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{sender.debug_port}")
+                browser = playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{sender.debug_port}",
+                    timeout=getattr(sender, "cdp_connect_timeout_ms", 15000),
+                )
                 context = browser.contexts[0] if browser.contexts else None
                 if context is None:
                     raise ChatReadError("Chrome CDP has no browser context")
@@ -455,25 +494,55 @@ class ChatGPTReadRelay:
                     if "not open" not in str(exc):
                         raise
                     page = context.new_page()
-                    opened_page = page
+                    # Register before navigation so a navigation timeout does
+                    # not leave an orphaned Courier tab behind.
+                    session_page = page
                     page.goto(self.chat_url, wait_until="domcontentloaded", timeout=120000)
                     if not read_url_matches(page.url, self.chat_url):
                         raise ChatReadError("configured conversation identity was not preserved after navigation")
-                latest = ChatGPTDOMReader(page, stability_wait_seconds=self.stability_wait_seconds).latest_completed_assistant()
+                session_page = page
+                verify_page = getattr(sender, "_verify_chat_page_identity", None)
+                if callable(verify_page) and is_chat_url(self.chat_url):
+                    verify_page(page)
+                latest = ChatGPTDOMReader(
+                    page,
+                    stability_wait_seconds=self.stability_wait_seconds,
+                    initial_render_wait_seconds=max(60.0, float(getattr(sender, "page_ready_timeout_seconds", 30))),
+                ).latest_completed_assistant()
                 if latest is None:
                     return ReadResult("chat_no_assistant_message", "conversation has no visible assistant message")
-                envelope = parse_outbound_envelope(latest.text, project_id=self.project_id)
+                try:
+                    envelope = parse_outbound_envelope(latest.text, project_id=self.project_id)
+                except ChatReadError as exc:
+                    if self.work_order_id is not None:
+                        return ReadResult(
+                            "chat_not_ready",
+                            f"newest completed assistant response is not for expected work_order_id {self.work_order_id}: {exc}",
+                            message_identity=latest.identity,
+                        )
+                    raise
                 if envelope is None:
                     return ReadResult("chat_no_work_order", "newest completed assistant message has no outbound envelope", message_identity=latest.identity)
+                if self.work_order_id is not None and envelope.work_order_id != self.work_order_id:
+                    return ReadResult(
+                        "chat_not_ready",
+                        f"newest completed assistant response has work_order_id {envelope.work_order_id!r}, expected {self.work_order_id!r}",
+                        message_identity=latest.identity,
+                    )
                 return consume_once(self.root, latest, envelope)
         except ChatReadNotReady:
             return ReadResult("chat_not_ready", "newest assistant response is not complete")
         finally:
-            if opened_page is not None:
-                try:
-                    opened_page.close()
-                except Exception:
-                    pass
+            # The selected page is always the configured conversation (or a
+            # page created for it). Close that exact page when requested even
+            # if CDP attached to an already-running Chrome process. The
+            # external browser process itself remains untouched.
+            if getattr(sender, "close_session_page", False):
+                close_page = getattr(sender, "_close_session_page", None)
+                if callable(close_page):
+                    close_page(session_page)
+                elif session_page is not None:
+                    self._close_page(session_page)
             if getattr(sender, "owned_process", None) is not None:
                 try:
                     sender.owned_process.terminate()
@@ -481,6 +550,204 @@ class ChatGPTReadRelay:
                 except (OSError, subprocess.TimeoutExpired):
                     pass
                 sender.owned_process = None
+
+    def _close_target_page(self) -> None:
+        """Close the configured page after a wait loop reaches a terminal state."""
+        sender = self._sender()
+        if self._last_debug_port is not None:
+            sender.debug_port = self._last_debug_port
+        close_page = getattr(sender, "_close_session_page", None)
+        if callable(close_page):
+            close_page(None)
+
+    def wait_for_work_order(self, *, max_seconds: int, interval_seconds: float = 2.0) -> ReadResult:
+        """Probe until the expected completed assistant work order is available.
+
+        This is the formal Chat-only receive phase. It never sends a correction
+        while the expected assistant response is absent, stale, or streaming.
+
+        The browser/CDP connection and target page are intentionally opened
+        once for the whole wait. Reconnecting Playwright on every probe can
+        leave stale protocol sessions behind and can outlive the workflow
+        deadline. The deadline here is therefore owned by one bounded relay
+        invocation, not by a chain of independent browser launches.
+        """
+        window = max(1, int(max_seconds))
+        deadline = time.monotonic() + window
+        sender = self._sender()
+        session_page = None
+        try:
+            from playwright.sync_api import sync_playwright
+
+            sender._launch()
+            self._last_debug_port = sender.debug_port
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{sender.debug_port}",
+                    timeout=getattr(sender, "cdp_connect_timeout_ms", 15000),
+                )
+                context = browser.contexts[0] if browser.contexts else None
+                if context is None:
+                    raise ChatReadError("Chrome CDP has no browser context")
+                try:
+                    page = self._select_page(context)
+                except ChatReadError as exc:
+                    if "not open" not in str(exc):
+                        raise
+                    page = context.new_page()
+                    # Register before navigation so a failed navigation is
+                    # still closed by the single finalizer below.
+                    session_page = page
+                    remaining = max(1.0, deadline - time.monotonic())
+                    page.goto(
+                        self.chat_url,
+                        wait_until="domcontentloaded",
+                        timeout=min(15000, int(remaining * 1000)),
+                    )
+                    if not read_url_matches(page.url, self.chat_url):
+                        raise ChatReadError("configured conversation identity was not preserved after navigation")
+                session_page = page
+                if not read_url_matches(str(page.url), self.chat_url):
+                    raise ChatReadError("configured ChatGPT conversation page does not match the registered URL")
+
+                # A read probe must not wait for a full page-ready/composer
+                # timeout. The DOM reader itself performs a short render and
+                # stability check; subsequent probes reuse that same page.
+                reader = ChatGPTDOMReader(
+                    page,
+                    stability_wait_seconds=self.stability_wait_seconds,
+                    initial_render_wait_seconds=2.0,
+                )
+                pending_events = {"chat_no_assistant_message", "chat_no_work_order", "chat_not_ready"}
+                while True:
+                    if time.monotonic() >= deadline:
+                        return ReadResult(
+                            "chat_read_timeout",
+                            f"no completed assistant work order arrived within {window}s",
+                        )
+                    try:
+                        latest = reader.latest_completed_assistant()
+                    except ChatReadNotReady as exc:
+                        result = ReadResult("chat_not_ready", str(exc))
+                    except Exception as exc:
+                        return ReadResult("chat_read_error", f"{type(exc).__name__}: {exc}")
+                    else:
+                        if latest is None:
+                            result = ReadResult("chat_no_assistant_message", "conversation has no visible assistant message")
+                        else:
+                            try:
+                                envelope = parse_outbound_envelope(latest.text, project_id=self.project_id)
+                            except ChatReadError as exc:
+                                if self.work_order_id is not None:
+                                    result = ReadResult(
+                                        "chat_not_ready",
+                                        f"newest completed assistant response is not for expected work_order_id {self.work_order_id}: {exc}",
+                                        message_identity=latest.identity,
+                                    )
+                                else:
+                                    return ReadResult("chat_read_error", str(exc), message_identity=latest.identity)
+                            else:
+                                if envelope is None:
+                                    result = ReadResult(
+                                        "chat_no_work_order",
+                                        "newest completed assistant message has no outbound envelope",
+                                        message_identity=latest.identity,
+                                    )
+                                elif self.work_order_id is not None and envelope.work_order_id != self.work_order_id:
+                                    result = ReadResult(
+                                        "chat_not_ready",
+                                        f"newest completed assistant response has work_order_id {envelope.work_order_id!r}, expected {self.work_order_id!r}",
+                                        message_identity=latest.identity,
+                                    )
+                                else:
+                                    try:
+                                        result = consume_once(self.root, latest, envelope)
+                                    except ChatReadReplayConflict as exc:
+                                        return ReadResult("chat_read_error", str(exc), message_identity=latest.identity)
+                    if result.event in {"chat_work_order_received", "chat_work_order_duplicate"}:
+                        return result
+                    if result.event not in pending_events:
+                        return result
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return ReadResult(
+                            "chat_read_timeout",
+                            f"no completed assistant work order arrived within {window}s; last_event={result.event}",
+                            message_identity=result.message_identity,
+                        )
+                    time.sleep(min(max(0.1, float(interval_seconds)), remaining))
+        except ChatReadNotReady as exc:
+            return ReadResult("chat_not_ready", str(exc))
+        except ChatReadError as exc:
+            return ReadResult("chat_read_error", str(exc))
+        except Exception as exc:
+            return ReadResult("chat_read_error", f"{type(exc).__name__}: {exc}")
+        finally:
+            # Always close the exact session page used by this bounded
+            # operation, including timeout and error paths. This is what
+            # prevents an abandoned visible Courier window from surviving a
+            # failed read. The external Chrome process is never terminated
+            # unless this invocation launched it itself.
+            if session_page is not None:
+                close_page = getattr(sender, "_close_session_page", None)
+                if callable(close_page):
+                    close_page(session_page)
+                else:
+                    self._close_page(session_page)
+            elif self._last_debug_port is not None:
+                close_page = getattr(sender, "_close_session_page", None)
+                if callable(close_page):
+                    close_page(None)
+            if getattr(sender, "owned_process", None) is not None:
+                try:
+                    sender.owned_process.terminate()
+                    sender.owned_process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                sender.owned_process = None
+
+    def _send_correction(self) -> bool:
+        if self.work_order_id is None:
+            return False
+        sender = self._sender()
+        sender.post_submit_delay = 0
+        sender.close_after_submit = True
+        try:
+            prompt = build_chat_read_correction_prompt(
+                project_id=self.project_id,
+                work_order_id=self.work_order_id,
+            )
+            result = sender.submit(prompt)
+            return bool(result.ok and result.verified)
+        finally:
+            if getattr(sender, "owned_process", None) is not None:
+                try:
+                    sender.owned_process.terminate()
+                    sender.owned_process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                sender.owned_process = None
+
+    def read_once(self) -> ReadResult:
+        correction_attempted = False
+        for attempt in range(2):
+            try:
+                result = self._read_once_without_correction()
+            except ChatReadError as exc:
+                result = ReadResult("chat_read_error", f"{type(exc).__name__}: {exc}")
+            needs_correction = result.event in {"chat_no_work_order", "chat_read_error"}
+            if not needs_correction or self.work_order_id is None or correction_attempted or attempt:
+                if correction_attempted and result.event in {"chat_no_work_order", "chat_read_error"}:
+                    return ReadResult("chat_repair_failed", result.detail, result.work_order_path, result.envelope, result.message_identity)
+                return result
+            correction_attempted = True
+            try:
+                corrected = self._send_correction()
+            except Exception as exc:
+                return ReadResult("chat_repair_failed", f"ChatGPT correction request failed: {type(exc).__name__}: {exc}")
+            if not corrected:
+                return ReadResult("chat_repair_failed", "ChatGPT correction request was not visibly submitted")
+        return ReadResult("chat_repair_failed", "ChatGPT correction attempt was exhausted")
 
 
 def main(argv=None) -> int:
@@ -490,9 +757,10 @@ def main(argv=None) -> int:
     parser.add_argument("--root", required=True)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--chat-url", required=True)
+    parser.add_argument("--work-order-id", help="expected work-order ID; enables one bounded correction request")
     args = parser.parse_args(argv)
     try:
-        result = ChatGPTReadRelay(root=Path(args.root), project_id=args.project_id, chat_url=args.chat_url).read_once()
+        result = ChatGPTReadRelay(root=Path(args.root), project_id=args.project_id, chat_url=args.chat_url, work_order_id=args.work_order_id).read_once()
     except ChatReadNotReady as exc:
         result = ReadResult("chat_not_ready", str(exc))
     except Exception as exc:

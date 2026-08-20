@@ -10,7 +10,12 @@ from contextlib import contextmanager
 
 from .chat_registry import current_chat_url, legacy_default_chat_url
 from .config import load_config
-from .protocol import validate_chat_payload, valid_correlation_id
+from .protocol import (
+    validate_chat_payload,
+    validate_instruction_level,
+    validate_task_difficulty,
+    valid_correlation_id,
+)
 from .url import is_chat_url
 
 
@@ -65,6 +70,10 @@ class OutboxRequest:
     message_path: Path
     message: str
     workflow_window_seconds: int
+    operation: str = "chat-send"
+    work_order_id: str = ""
+    task_difficulty: str = "normal"
+    instruction_level: str = "normal"
 
 
 def request_directory(path: str | Path) -> Path:
@@ -126,8 +135,9 @@ def validate_request(path: str | Path, *, home: Path | None = None, require_read
         _safe_file(ready, "READY")
     if raw.get("version") != REQUEST_VERSION:
         raise RequestValidationError(f"outbox request version must be {REQUEST_VERSION}", "invalid_version")
-    if raw.get("operation", "chat-send") != "chat-send":
-        raise RequestValidationError("outbox request operation must be chat-send", "invalid_operation")
+    operation = raw.get("operation", "chat-send")
+    if operation not in {"chat-send", "chat-send-read"}:
+        raise RequestValidationError("outbox request operation must be chat-send or chat-send-read", "invalid_operation")
     project_id = raw.get("project_id")
     correlation_id = raw.get("correlation_id")
     task_id = raw.get("task_id")
@@ -143,6 +153,24 @@ def validate_request(path: str | Path, *, home: Path | None = None, require_read
         raise RequestValidationError("outbox keyword must be a non-empty ASCII identifier", "invalid_keyword")
     if not valid_identifier(request_id):
         raise RequestValidationError("outbox request_id must be a non-empty ASCII identifier", "invalid_request_id")
+    work_order_id = raw.get("work_order_id", "")
+    if operation == "chat-send-read":
+        if not valid_identifier(work_order_id):
+            raise RequestValidationError("chat-send-read requires a non-empty ASCII work_order_id", "invalid_work_order_id")
+    elif work_order_id:
+        raise RequestValidationError("work_order_id requires operation chat-send-read", "invalid_operation")
+    task_difficulty = raw.get("task_difficulty", "normal")
+    instruction_level = raw.get("instruction_level", "normal")
+    try:
+        validate_task_difficulty(task_difficulty)
+        validate_instruction_level(instruction_level)
+    except (TypeError, ValueError) as exc:
+        raise RequestValidationError(str(exc), "invalid_operation_mode") from exc
+    if operation == "chat-send" and (task_difficulty != "normal" or instruction_level != "normal"):
+        raise RequestValidationError(
+            "task_difficulty and instruction_level require operation chat-send-read",
+            "invalid_operation_mode",
+        )
     chat_url = _resolved_chat_url(home, project_id, raw.get("chat_url"))
     message_name = _relative_message_path(raw.get("message_file"))
     message_path = (directory / message_name).resolve()
@@ -164,7 +192,11 @@ def validate_request(path: str | Path, *, home: Path | None = None, require_read
         raise RequestValidationError("workflow_window_seconds must be an integer from 1 to 3600", "invalid_workflow_window")
     if reject_reuse and (directory / "receipt.json").exists():
         raise RequestReuseError(f"request already has receipt.json: {directory / 'receipt.json'}")
-    return OutboxRequest(directory, request_id, project_id, correlation_id, task_id, keyword, chat_url, message_path, message, window)
+    return OutboxRequest(
+        directory, request_id, project_id, correlation_id, task_id, keyword,
+        chat_url, message_path, message, window, operation, work_order_id,
+        task_difficulty, instruction_level,
+    )
 
 
 def load_request(path: str | Path, *, home: Path | None = None, require_ready: bool = True, reject_reuse: bool = False) -> OutboxRequest:

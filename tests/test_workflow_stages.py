@@ -128,6 +128,85 @@ class WorkflowStageTests(unittest.TestCase):
                 self.assertEqual(chat_send_request(args), 1)
             self.assertIn('"event": "configuration_error"', second_output.getvalue())
 
+    def test_chat_send_read_submit_records_transport_and_modes_without_gmail_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_request(
+                root,
+                ready=True,
+            )
+            manifest = json.loads((root / "request.json").read_text(encoding="utf-8"))
+            manifest.update({
+                "operation": "chat-send-read",
+                "work_order_id": "WO-20260820-001",
+                "task_difficulty": "hard",
+                "instruction_level": "detailed",
+            })
+            (root / "request.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+            class FakeResult:
+                ok = True
+                verified = True
+                detail = "verified ChatGPT-only submission"
+
+            class FakeSender:
+                launch_evidence = {"mode": "attached-existing", "target_url": CHAT_URL}
+                submitted_message = ""
+                receipt_state_during_submit = None
+
+                def __init__(self, _config):
+                    pass
+
+                def submit(self, message):
+                    FakeSender.submitted_message = message
+                    FakeSender.receipt_state_during_submit = json.loads(
+                        (root / "receipt.json").read_text(encoding="utf-8")
+                    )["state"]
+                    return FakeResult()
+
+            output = io.StringIO()
+            class FakeReadRelay:
+                def __init__(self, **_kwargs):
+                    pass
+
+                def wait_for_work_order(self, **_kwargs):
+                    self.receipt_state_during_wait = json.loads(
+                        (root / "receipt.json").read_text(encoding="utf-8")
+                    )["state"]
+                    FakeReadRelay.last_receipt_state = self.receipt_state_during_wait
+                    return SimpleNamespace(event="chat_work_order_received", detail="fake received", work_order_path=None)
+
+            with patch("gmail_courier.cli.home_dir", return_value=root), patch("agent_relay.chatgpt_sender.BrowserChatGPTSender", FakeSender), patch("agent_relay.chatgpt_read_relay.ChatGPTReadRelay", FakeReadRelay), redirect_stdout(output):
+                self.assertEqual(chat_send_request(SimpleNamespace(request=str(root))), 0)
+            rendered = output.getvalue()
+            self.assertIn('"transport": "CHATGPT_DOM_READ"', rendered)
+            self.assertIn('"task_difficulty": "hard"', rendered)
+            self.assertIn('"instruction_level": "detailed"', rendered)
+            self.assertIn("somewhat more difficult task", FakeSender.submitted_message)
+            self.assertIn("more detailed work order", FakeSender.submitted_message)
+            self.assertEqual(FakeSender.receipt_state_during_submit, "submission_started")
+            self.assertEqual(FakeReadRelay.last_receipt_state, "waiting_for_assistant")
+            receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
+            self.assertEqual(receipt["transport"], "CHATGPT_DOM_READ")
+            self.assertEqual(receipt["work_order_id"], "WO-20260820-001")
+            self.assertEqual(receipt["task_difficulty"], "hard")
+            self.assertEqual(receipt["instruction_level"], "detailed")
+            self.assertNotIn("gmail_max_seconds", receipt)
+
+    def test_chat_send_read_does_not_enter_archived_gmail_poll(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_request(root, ready=True)
+            manifest = json.loads((root / "request.json").read_text(encoding="utf-8"))
+            manifest.update({"operation": "chat-send-read", "work_order_id": "WO-20260820-001"})
+            (root / "request.json").write_text(json.dumps(manifest), encoding="utf-8")
+            write_receipt(root, request_id="REQ-001", state="submitted", detail="submitted")
+            output = io.StringIO()
+            args = SimpleNamespace(request=str(root), max_seconds=360, interval_seconds=10, lookback_seconds=1200)
+            with patch("gmail_courier.cli.home_dir", return_value=root), patch("gmail_courier.cli.sync_until_received", side_effect=AssertionError("Gmail must not be called")), redirect_stdout(output):
+                self.assertEqual(poll_request(args), 1)
+            self.assertIn("archived_transport", output.getvalue())
+
     def test_submit_forwards_factual_payload_without_content_classification(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

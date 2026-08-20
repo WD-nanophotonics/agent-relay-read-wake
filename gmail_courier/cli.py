@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -31,9 +32,15 @@ from .outbox import (
     validate_request,
     write_receipt,
 )
-from .protocol import (CHAT_CONTENT_POLICY, build_automated_prompt,
-                       build_chat_read_prompt, validate_chat_payload,
-                       valid_correlation_id)
+from .protocol import (
+    CHAT_CONTENT_POLICY,
+    INSTRUCTION_LEVEL_VALUES,
+    TASK_DIFFICULTY_VALUES,
+    build_automated_prompt,
+    build_chat_read_prompt,
+    validate_chat_payload,
+    valid_correlation_id,
+)
 from .url import is_chat_url
 
 
@@ -50,6 +57,18 @@ IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 def valid_identifier(value: str) -> bool:
     return bool(IDENTIFIER_RE.fullmatch(value))
+
+
+def _chat_read_root(preferred: Path) -> Path:
+    """Choose a writable default inbox root before Chat is contacted."""
+    candidates = (preferred, Path(tempfile.gettempdir()) / "GmailCourier")
+    for candidate in candidates:
+        try:
+            (candidate / "inbox" / "chatgpt").mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError:
+            continue
+    raise PermissionError("no writable local ChatGPT inbox root is available")
 
 
 def valid_attachment_filename(value: str) -> bool:
@@ -89,6 +108,11 @@ def _event_context(path: str | Path, request=None) -> dict:
         "task_id": getattr(request, "task_id", raw.get("task_id")),
         "keyword": getattr(request, "keyword", raw.get("keyword")),
         "correlation_id": getattr(request, "correlation_id", raw.get("correlation_id")),
+        "operation": getattr(request, "operation", raw.get("operation", "chat-send")),
+        "transport": "CHATGPT_DOM_READ" if getattr(request, "operation", raw.get("operation", "chat-send")) == "chat-send-read" else "GMAIL_LEGACY",
+        "work_order_id": getattr(request, "work_order_id", raw.get("work_order_id", "")),
+        "task_difficulty": getattr(request, "task_difficulty", raw.get("task_difficulty", "normal")),
+        "instruction_level": getattr(request, "instruction_level", raw.get("instruction_level", "normal")),
         "target_path": str(directory.resolve()),
         "python_started": True,
         "browser_started": False,
@@ -133,6 +157,7 @@ def _request_error_event(path: str | Path, phase: str, exc: BaseException, *, re
         ok=False,
         detail=str(exc),
         error_text=f"{type(exc).__name__}: {exc}",
+        error_code=getattr(exc, "code", None),
         command=sys.argv,
         denied_path=denied_path,
     )
@@ -288,8 +313,15 @@ def chat_send_read(args) -> int:
             sys.stdin.read(),
             project_id=args.project_id,
             work_order_id=args.work_order_id,
+            task_difficulty=getattr(args, "task_difficulty", "normal"),
+            instruction_level=getattr(args, "instruction_level", "normal"),
         )
     except (TypeError, ValueError) as exc:
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "detail": str(exc)}), file=sys.stderr)
+        return 1
+    try:
+        read_root = _chat_read_root(home_dir())
+    except OSError as exc:
         print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "detail": str(exc)}), file=sys.stderr)
         return 1
 
@@ -297,13 +329,29 @@ def chat_send_read(args) -> int:
         chat_url = args.url
         require_fixed_chat_url = False
         close_after_submit = False
+        # Keep the target page open while the receive phase probes the
+        # completed assistant response. The relay closes it at the terminal
+        # receive state or timeout.
+        close_session_page = False
         post_submit_delay = 0
 
-    result = BrowserChatGPTSender(Config()).submit(message)
+    sender = BrowserChatGPTSender(Config())
+    result = sender.submit(message)
     if result.ok and result.verified:
-        print(json.dumps({"event": "chat_submitted", "transport": "CHATGPT_DOM_READ", "project_id": args.project_id, "work_order_id": args.work_order_id, "detail": result.detail}, ensure_ascii=False))
-        return 0
-    print(json.dumps({"event": getattr(result, "category", "chat_submission_error"), "transport": "CHATGPT_DOM_READ", "ok": False, "detail": result.detail}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"event": "chat_submitted", "transport": "CHATGPT_DOM_READ", "project_id": args.project_id, "work_order_id": args.work_order_id, "task_difficulty": getattr(args, "task_difficulty", "normal"), "instruction_level": getattr(args, "instruction_level", "normal"), "detail": result.detail}, ensure_ascii=False), flush=True)
+        from agent_relay.chatgpt_read_relay import ChatGPTReadRelay
+        received = ChatGPTReadRelay(
+            root=read_root,
+            project_id=args.project_id,
+            chat_url=args.url,
+            work_order_id=args.work_order_id,
+            close_session_page=False,
+        ).wait_for_work_order(max_seconds=DEFAULT_WORKFLOW_WINDOW_SECONDS, interval_seconds=2)
+        print(json.dumps({"event": received.event, "transport": "CHATGPT_DOM_READ", "project_id": args.project_id, "work_order_id": args.work_order_id, "detail": received.detail, "work_order_path": str(received.work_order_path) if received.work_order_path else None}, ensure_ascii=False), flush=True)
+        return 0 if received.event in {"chat_work_order_received", "chat_work_order_duplicate"} else 1
+    sender.close_session_page = True
+    sender._close_session_page(None)
+    print(json.dumps({"event": getattr(result, "category", "chat_submission_error"), "transport": "CHATGPT_DOM_READ", "ok": False, "project_id": args.project_id, "work_order_id": args.work_order_id, "task_difficulty": getattr(args, "task_difficulty", "normal"), "instruction_level": getattr(args, "instruction_level", "normal"), "detail": result.detail}, ensure_ascii=False), file=sys.stderr)
     return 1
 
 
@@ -316,31 +364,129 @@ def chat_send_request(args) -> int:
     except Exception as exc:
         return _request_error_event(args.request, "submit", exc)
 
+    chat_read = request.operation == "chat-send-read"
+
     class Config:
         chat_url = request.chat_url
         require_fixed_chat_url = False
-        close_after_submit = True
-        post_submit_delay = request.workflow_window_seconds
+        close_after_submit = not chat_read
+        close_session_page = not chat_read
+        post_submit_delay = 0 if chat_read else request.workflow_window_seconds
         window_width = 640
         window_height = 480
 
     try:
         with submit_lock(request):
+            if chat_read:
+                try:
+                    (request.directory / "inbox" / "chatgpt").mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    return _request_error_event(args.request, "validate-request", RequestValidationError(f"chat-send-read inbox is not writable: {exc}", "inbox_not_writable"), request=request)
             emit_event("request_validated", "validate-request", args.request, request=request, ok=True, detail="READY request validated; no external action has started")
             emit_event("submission_started", "submit", args.request, request=request, ok=None, detail="starting the explicitly requested ChatGPT submission", command=sys.argv)
+            if chat_read:
+                # Persist an initial state before touching Chrome. This is
+                # intentionally earlier than chat_submitted: a blocked or
+                # hung host operation must still leave a durable indication
+                # that Courier started and has not yet confirmed delivery.
+                try:
+                    write_receipt(
+                        request.directory,
+                        request_id=request.request_id,
+                        state="submission_started",
+                        detail="Courier started ChatGPT submission; external delivery is not yet confirmed",
+                        stage="submit",
+                        project_id=request.project_id,
+                        correlation_id=request.correlation_id,
+                        task_id=request.task_id,
+                        keyword=request.keyword,
+                        chat_url=request.chat_url,
+                        message_file=str(request.message_path),
+                        browser_started=False,
+                        browser_used=False,
+                        workflow_window_seconds=request.workflow_window_seconds,
+                        content_policy=CHAT_CONTENT_POLICY,
+                        transport="CHATGPT_DOM_READ",
+                        work_order_id=request.work_order_id,
+                        task_difficulty=request.task_difficulty,
+                        instruction_level=request.instruction_level,
+                    )
+                except Exception as exc:
+                    _request_error_event(args.request, "submit", exc, request=request)
+                    return 1
             sender = BrowserChatGPTSender(Config())
-            message = build_automated_prompt(request.message, request.correlation_id)
+            if chat_read:
+                message = build_chat_read_prompt(
+                    request.message,
+                    project_id=request.project_id,
+                    work_order_id=request.work_order_id,
+                    task_difficulty=request.task_difficulty,
+                    instruction_level=request.instruction_level,
+                )
+            else:
+                message = build_automated_prompt(request.message, request.correlation_id)
             result = sender.submit(message)
             browser_started = sender.launch_evidence.get("mode") == "launch-new" and isinstance(sender.launch_evidence.get("pid"), int)
             browser_used = sender.launch_evidence.get("mode") == "attached-existing" or browser_started
             if result.ok and result.verified:
-                emit_event("chat_submitted", "submit", args.request, request=request, ok=True, detail=result.detail, browser_started=browser_started, browser_used=browser_used, content_policy=CHAT_CONTENT_POLICY, diagnostic=sender.launch_evidence)
+                transport = "CHATGPT_DOM_READ" if chat_read else "GMAIL_LEGACY"
+                emit_event("chat_submitted", "submit", args.request, request=request, ok=True, detail=result.detail, browser_started=browser_started, browser_used=browser_used, content_policy=CHAT_CONTENT_POLICY, transport=transport, work_order_id=request.work_order_id, task_difficulty=request.task_difficulty, instruction_level=request.instruction_level, diagnostic=sender.launch_evidence)
+                read_result = None
+                if chat_read:
+                    from agent_relay.chatgpt_read_relay import ChatGPTReadRelay
+                    # Make the in-progress state durable before entering the
+                    # bounded receive window. A long-running or interrupted
+                    # read must never leave the Agent unable to tell whether
+                    # submission happened and whether polling actually began.
+                    try:
+                        write_receipt(
+                            request.directory,
+                            request_id=request.request_id,
+                            state="waiting_for_assistant",
+                            detail="ChatGPT user turn was verified; waiting for one completed assistant work order",
+                            stage="poll",
+                            project_id=request.project_id,
+                            correlation_id=request.correlation_id,
+                            task_id=request.task_id,
+                            keyword=request.keyword,
+                            chat_url=request.chat_url,
+                            message_file=str(request.message_path),
+                            diagnostic=sender.launch_evidence,
+                            browser_started=browser_started,
+                            browser_used=browser_used,
+                            workflow_window_seconds=request.workflow_window_seconds,
+                            content_policy=CHAT_CONTENT_POLICY,
+                            transport=transport,
+                            work_order_id=request.work_order_id,
+                            task_difficulty=request.task_difficulty,
+                            instruction_level=request.instruction_level,
+                        )
+                    except Exception as exc:
+                        _request_error_event(args.request, "poll", exc, request=request)
+                        return 1
+                    read_result = ChatGPTReadRelay(
+                        root=request.directory,
+                        project_id=request.project_id,
+                        chat_url=request.chat_url,
+                        work_order_id=request.work_order_id,
+                        close_session_page=False,
+                    ).wait_for_work_order(max_seconds=request.workflow_window_seconds, interval_seconds=2)
+                    emit_event(
+                        read_result.event,
+                        "poll",
+                        args.request,
+                        request=request,
+                        ok=read_result.event in {"chat_work_order_received", "chat_work_order_duplicate"},
+                        detail=read_result.detail,
+                        transport=transport,
+                        work_order_id=request.work_order_id,
+                        work_order_path=str(read_result.work_order_path) if read_result.work_order_path else None,
+                    )
+                    if read_result.event not in {"chat_work_order_received", "chat_work_order_duplicate"}:
+                        write_receipt(request.directory, request_id=request.request_id, state=read_result.event, detail=read_result.detail, stage="poll", project_id=request.project_id, correlation_id=request.correlation_id, task_id=request.task_id, keyword=request.keyword, chat_url=request.chat_url, message_file=str(request.message_path), diagnostic=sender.launch_evidence, browser_started=browser_started, browser_used=browser_used, workflow_window_seconds=request.workflow_window_seconds, content_policy=CHAT_CONTENT_POLICY, transport=transport, work_order_id=request.work_order_id, task_difficulty=request.task_difficulty, instruction_level=request.instruction_level)
+                        return 1
                 try:
-                    receipt_path = write_receipt(
-                        request.directory,
-                        request_id=request.request_id,
-                        state="submitted",
-                        detail=result.detail,
+                    receipt_values = dict(
                         stage="submit",
                         project_id=request.project_id,
                         correlation_id=request.correlation_id,
@@ -352,10 +498,24 @@ def chat_send_request(args) -> int:
                         browser_started=browser_started,
                         browser_used=browser_used,
                         workflow_window_seconds=request.workflow_window_seconds,
-                        gmail_max_seconds=DEFAULT_POLL_MAX_SECONDS,
-                        interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
-                        lookback_seconds=DEFAULT_LOOKBACK_SECONDS,
                         content_policy=CHAT_CONTENT_POLICY,
+                        transport=transport,
+                        work_order_id=request.work_order_id,
+                        task_difficulty=request.task_difficulty,
+                        instruction_level=request.instruction_level,
+                    )
+                    if not chat_read:
+                        receipt_values.update(
+                            gmail_max_seconds=DEFAULT_POLL_MAX_SECONDS,
+                            interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
+                            lookback_seconds=DEFAULT_LOOKBACK_SECONDS,
+                        )
+                    receipt_path = write_receipt(
+                        request.directory,
+                        request_id=request.request_id,
+                        state="received" if chat_read else "submitted",
+                        detail=read_result.detail if read_result is not None else result.detail,
+                        **receipt_values,
                     )
                 except Exception as exc:
                     _request_error_event(args.request, "submit", exc, request=request)
@@ -379,16 +539,16 @@ def chat_send_request(args) -> int:
                     diagnostic=sender.launch_evidence,
                     browser_started=browser_started,
                     browser_used=browser_used,
-                    workflow_window_seconds=request.workflow_window_seconds,
-                    gmail_max_seconds=DEFAULT_POLL_MAX_SECONDS,
-                    interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
-                    lookback_seconds=DEFAULT_LOOKBACK_SECONDS,
+                    transport="CHATGPT_DOM_READ" if chat_read else "GMAIL_LEGACY",
+                    work_order_id=request.work_order_id,
+                    task_difficulty=request.task_difficulty,
+                    instruction_level=request.instruction_level,
                     content_policy=CHAT_CONTENT_POLICY,
                 )
             except Exception as exc:
                 _request_error_event(args.request, "submit", exc, request=request)
                 return 1
-            emit_event(event, "submit", args.request, request=request, ok=False, detail=detail, error_text=detail, command=sys.argv, browser_started=browser_started, browser_used=browser_used, content_policy=CHAT_CONTENT_POLICY)
+            emit_event(event, "submit", args.request, request=request, ok=False, detail=detail, error_text=detail, command=sys.argv, browser_started=browser_started, browser_used=browser_used, content_policy=CHAT_CONTENT_POLICY, transport="CHATGPT_DOM_READ" if chat_read else "GMAIL_LEGACY", work_order_id=request.work_order_id, task_difficulty=request.task_difficulty, instruction_level=request.instruction_level)
             return 1
     except Exception as exc:
         return _request_error_event(args.request, "submit", exc, request=request)
@@ -397,6 +557,11 @@ def chat_send_request(args) -> int:
 def poll_request(args) -> int:
     try:
         request = load_request(args.request, home=home_dir(), require_ready=True, reject_reuse=False)
+        if request.operation == "chat-send-read":
+            raise RequestValidationError(
+                "Gmail polling is archived for chat-send-read; use agent-relay chat-read-once",
+                "archived_transport",
+            )
         receipt_path = request.directory / "receipt.json"
         if not receipt_path.is_file():
             raise RequestValidationError("poll requires a receipt.json created by submit", "missing_submit_receipt")
@@ -766,6 +931,8 @@ def main(argv=None) -> int:
     read_send_parser.add_argument("--url", required=True, help="HTTPS ChatGPT /c/<conversation-id> URL")
     read_send_parser.add_argument("--project-id", required=True)
     read_send_parser.add_argument("--work-order-id", required=True)
+    read_send_parser.add_argument("--task-difficulty", choices=TASK_DIFFICULTY_VALUES, default="normal")
+    read_send_parser.add_argument("--instruction-level", choices=INSTRUCTION_LEVEL_VALUES, default="normal")
     request_parser = sub.add_parser("submit", aliases=["chat-send-request"], help="submit a READY request to ChatGPT; this is the external-send stage")
     request_parser.add_argument("--request", required=True, help="outbox request directory or request.json path")
     poll_parser = sub.add_parser("poll", help="archived: poll Gmail for a previously submitted request")
