@@ -1,9 +1,19 @@
-# AgentRelay local-task boundaries
+# ChatCourier integration guide
 
-- Do not run `pytest` or `unittest` discovery unless the staged task text explicitly contains `PYTEST_EXPLICITLY_AUTHORIZED`.
-- Codex performs only the staged local repository task, its requested checks, commit/push, and then exits normally to the surrounding AgentRelay wrapper.
-- `agent_relay.worker.OneShotWorker` owns the normal post-exit ChatGPT handoff and watchdog startup. Codex must not wait for Gmail or ChatGPT.
-- Handle routine engineering failures through the repository's existing automated recovery/handoff path; do not ask a user to relay messages.
-- Staged task content remains in its staged file. Do not copy staged task bodies into process arguments.
+Use this repository only for the mechanical ChatGPT transport. Prepare a
+request directory, call `chat-courier validate`, then explicitly call
+`chat-courier run`. Do not invoke Gmail, a second browser controller, or a
+parallel reader for the same request.
 
-Keep these boundaries local and bounded. Do not introduce a Supervisor, persistent runner, App Server lifecycle, or another daemon unless a staged task explicitly requires it.
+The Agent must use a unique `request_id`, keep its own process alive for at
+least 420 seconds when ChatCourier uses the default 360-second window, and
+read `response.txt` only after the `response_received` event. Do not rerun a
+changed request directory: create a new request ID instead.
+
+ChatCourier's prompt marks Agent text as quoted reference. ChatGPT has final
+authority over task scope, difficulty, and detail. `task_difficulty` and
+`instruction_level` are optional preferences, not commands.
+
+Run only targeted tests explicitly named for the current change. Do not add a
+persistent service, mailbox transport, worker scheduler, or browser runtime
+outside the single bounded ChatCourier process.
