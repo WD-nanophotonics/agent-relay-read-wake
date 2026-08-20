@@ -1,5 +1,9 @@
 # AgentRelay architecture note (Phase 1 / Phase 3A / Phase 2J)
 
+> **Current status:** ChatGPT assistant → Python/CDP reader → local inbox is
+> the official return path. The Gmail polling architecture described below is
+> retained as archived compatibility behavior; it is not the default workflow.
+
 ## Why software waits
 
 The only loop is a bounded Gmail polling loop owned by the supervisor. It consumes no model tokens. Codex is contacted only after an explicit, persisted lease passes deterministic validation. A real wake implementation is intentionally absent from Phase 1.

@@ -2,24 +2,25 @@
 
 面向其他 Agent 的完整产品说明在 [AGENT_RELAY_GUIDE.md](AGENT_RELAY_GUIDE.md)。调用前应先阅读它；其中定义了项目 ID、ChatGPT URL、correlation ID、outbox、inbox、事件和等待时序。
 
-本仓库提供一个通用的 Gmail↔ChatGPT 中转层和一个短命、可审计的 `agent-relay`。调用方负责提供项目身份、任务身份、关键词和目标对话；中转层不理解具体业务：
+本仓库的正式工作流是 ChatGPT assistant → Python/CDP reader → 本地 `inbox/chatgpt`。调用方负责提供项目身份、工作单身份和目标对话；中转层不理解具体业务。Gmail 收取链路已经归档为兼容功能，保留代码和旧运行数据，但不会由正式 Chat 工作流自动启动。详见 [归档说明](docs/ARCHIVED_GMAIL_TRANSPORT.md)。
 
 ```text
-Python Gmail poll-once
-  └─ stage at most one → spawn exactly one Worker
-       └─ bounded work / checks / commit / push / configured ChatGPT handoff
-            └─ detached watchdog (最多两次 poll-once) → Worker exits
+local Agent
+  └─ chat-send-read → fixed ChatGPT conversation
+       └─ chat-read-once → validate AGENTRELAY_OUTBOUND/1
+            └─ durable inbox/chatgpt work order → local Agent/Worker
 ```
 
 “AI 永不等待，软件等待”。`poll-once` 只执行一个 Gmail fetch cycle，不 sleep、不循环、不通过 Codex Gmail integration 读取邮件。已有活动的精确 Worker owner 会使本次调用无操作；旧步骤忽略，未来有效步骤暂缓且不消费，同一 logical step 的不同哈希 fail closed。`NO_ACTION` 只推进协议序号，`WAKE` 才暂存并启动 Worker，`HUMAN_REQUIRED` 不启动 Worker。
 
-持久化使用 `IDLE`、`READY_TO_DISPATCH`、`DISPATCHING`、`BUSY`、`AWAITING_AUDIT` 和 `STOPPED`，以及 run/expected step/parent、已消费 Gmail ID、logical hash、停止标记、decision/work-order 记录、dispatch intent 和精确 pending/active-worker owner。合法 v2 `AUDIT_DECISION` 在派发前先持久化；Worker 精确认领并原子确认后才消费 Gmail ID、推进 expected step。授权 work order 完成后进入 `AWAITING_AUDIT`，不会被当作普通 idle。相同内容的重复 decision 不重复派发，哈希冲突 fail closed，崩溃后的不确定状态不会自动创建第二个 Worker。状态 JSON 原子替换，账本为追加 JSONL；inbox 暂存先写临时目录再原子发布。Gmail 默认落在 `<project-root>/inbox/<canonical-project-id>`；调用方也可以配置相对或绝对 inbox。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\<project-id>`，不进入 Git。
+持久化使用 `IDLE`、`READY_TO_DISPATCH`、`DISPATCHING`、`BUSY`、`AWAITING_AUDIT` 和 `STOPPED`，以及 run/expected step/parent、logical hash、停止标记、decision/work-order 记录、dispatch intent 和精确 pending/active-worker owner。ChatGPT 回信使用 `AGENTRELAY_OUTBOUND/1`，以 canonical JSON SHA-256 校验，并用 `chatgpt/outbound_receipts.json` 防止重复消费。授权 work order 完成后进入 `AWAITING_AUDIT`，不会被当作普通 idle。相同内容的重复 decision 不重复派发，哈希冲突 fail closed，崩溃后的不确定状态不会自动创建第二个 Worker。状态 JSON 原子替换，账本为追加 JSONL；Chat work order 暂存先写临时目录再原子发布。运行时数据默认在 `%LOCALAPPDATA%\AgentRelay\projects\<project-id>`，不进入 Git。
 
 ## 命令
 
 ```powershell
 python -m pip install -e ".[dev]"
 agent-relay init
+agent-relay chat-read-once --project-id <project-id> --chat-url <chat-url> --read-root <local-root>
 agent-relay poll-once
 agent-relay run-agent --staged <staged-instruction-directory>
 agent-relay status
@@ -40,13 +41,15 @@ building.
 
 `test-gmail` 只验证 OAuth 和连通性；`test-wake` 只验证 mock launcher。`run-agent` 是手动/外部启动 Relay Agent 的唯一 managed entry：它创建 pending owner，启动一个真实 Worker，Worker 负责读取 staged task、记录终端结果、写入 `handoff_obligations/<worker_id>.json`，并在配置的 ChatGPT token 验证后才结束。每个 claimed Worker 都必须经历 `OPEN → RESULT_READY → SENDING → VERIFIED`；失败 handoff 不会删除债务，下一次 `poll-once` 会执行一次有界恢复。Watchdog 只能在 handoff `VERIFIED` 后启动。
 
-统一入口也提供独立 Python Chrome/CDP 发送：
+`poll-once`、`test-gmail`、`gmail-courier poll` 和 `chat-test` 都属于归档 Gmail 兼容入口，不是正式 Chat→本地工作流的一部分。正式发送使用 `gmail-courier chat-send-read`，正式回读使用 `agent-relay chat-read-once`。
+
+归档兼容层仍提供独立 Python Chrome/CDP 发送：
 
 ```powershell
 Get-Content .\message.txt | gmail-courier chat-send --url https://chatgpt.com/c/<conversation-id>
 ```
 
-`gmail-courier once`/`run` 负责 Gmail 收取，`chat-send` 负责向调用方指定的 ChatGPT 对话发送 stdin 内容。Chrome 使用专用 profile、loopback CDP 和最小化启动参数；Windows 的非激活启动是 best effort，Chrome 或系统仍可能把窗口带到前台，因此不能把它当作绝对静默保证。
+`chat-send-read` 是正式 Chat-only 发送入口；它不会要求 ChatGPT 发 Gmail。Chrome 使用专用 profile、loopback CDP 和最小化启动参数；Windows 的非激活启动是 best effort，Chrome 或系统仍可能把窗口带到前台，因此不能把它当作绝对静默保证。旧 `chat-send`、`once`/`run` 和 Gmail 收取命令仅用于兼容或单独调查。
 
 Agent 也可以使用文件式 outbox，避免 shell/stdin 转义：在请求目录中完整写入 `request.json` 和 `message.txt`，先运行 `gmail-courier validate-request`，再运行 `gmail-courier create-ready`，最后才运行 `gmail-courier submit`（兼容命令 `chat-send-request`）。manifest 必须提供本轮唯一的 `correlation_id` 和 `keyword`；Python 会在提交前把固定的英文识别指令追加到消息末尾。发送结果会写入同目录的 `receipt.json`；`inbox` 仅用于保存 Gmail 收件结果。当前 workflow window 为 360 秒，同时作为 ChatGPT 页面保持时间和 Gmail 最大等待时间；发送器会优先复用已验证的目标 CDP 会话，避免对已锁定的 Chrome profile 启动第二个实例。
 

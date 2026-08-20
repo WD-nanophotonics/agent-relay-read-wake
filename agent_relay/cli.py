@@ -26,7 +26,7 @@ class _DiagnosticHandoffSink:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-relay")
-    parser.add_argument("command", choices=("init", "poll-once", "run-agent", "worker", "watchdog", "watchdog-ui", "monitor", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
+    parser.add_argument("command", choices=("init", "chat-read-once", "poll-once", "run-agent", "worker", "watchdog", "watchdog-ui", "monitor", "stop", "status", "test-gmail", "test-wake", "bind"), nargs="?", default="status")
     parser.add_argument("--run")
     parser.add_argument("--step", type=int)
     parser.add_argument("--parent", type=int)
@@ -39,6 +39,7 @@ def main(argv=None) -> int:
     parser.add_argument("--target-id")
     parser.add_argument("--target-type", default="codex-cli")
     parser.add_argument("--chat-url")
+    parser.add_argument("--read-root")
     parser.add_argument("--project-id")
     parser.add_argument("--display-name")
     parser.add_argument("--channel-id")
@@ -71,6 +72,15 @@ def main(argv=None) -> int:
             install_guide(project_root)
         print(f"BOUND {binding}\nGUIDE {guide}")
         return 0
+    if args.command == "chat-read-once":
+        if not args.project_id or not args.chat_url:
+            parser.error("chat-read-once requires --project-id and --chat-url")
+        from .chatgpt_read_relay import main as chat_read_main
+        return chat_read_main([
+            "--root", args.read_root or str(home / "chatgpt"),
+            "--project-id", args.project_id,
+            "--chat-url", args.chat_url,
+        ])
     config = load_config(home)
     store = StateStore(config.local_project_storage)
     if args.command == "status":

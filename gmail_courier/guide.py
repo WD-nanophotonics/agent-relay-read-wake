@@ -3,7 +3,21 @@ from __future__ import annotations
 
 GUIDE_FILENAME = "AGENT_RELAY_GUIDE.md"
 
-GUIDE_TEXT = r'''# Generic Gmail–ChatGPT Relay Guide
+GUIDE_TEXT = r'''# Generic ChatGPT–Local Relay Guide
+
+## Official transport
+
+The official workflow is now:
+
+```text
+local Agent -> gmail-courier chat-send-read -> fixed ChatGPT conversation
+           -> agent-relay chat-read-once -> local inbox/chatgpt work order
+```
+
+The Gmail receive path is archived compatibility functionality. It remains
+available for legacy projects and historical investigation, but the official
+workflow must not start Gmail polling or use Gmail as its completion signal.
+See `docs/ARCHIVED_GMAIL_TRANSPORT.md` in the source repository.
 
 Read this file before calling the transport. This component is a bounded
 message relay for an Agent workflow. It does not know what the Agent's

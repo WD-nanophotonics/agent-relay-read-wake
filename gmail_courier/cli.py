@@ -32,7 +32,8 @@ from .outbox import (
     write_receipt,
 )
 from .protocol import (CHAT_CONTENT_POLICY, build_automated_prompt,
-                       validate_chat_payload, valid_correlation_id)
+                       build_chat_read_prompt, validate_chat_payload,
+                       valid_correlation_id)
 from .url import is_chat_url
 
 
@@ -272,6 +273,37 @@ def chat_send(args) -> int:
         print("SUBMITTED")
         return 0
     print(json.dumps({"event": getattr(result, "category", "chat_submission_error"), "phase": "submit", "ok": False, "content_policy": CHAT_CONTENT_POLICY, "detail": result.detail}, ensure_ascii=False), file=sys.stderr)
+    return 1
+
+
+def chat_send_read(args) -> int:
+    """Send one request for the official ChatGPT-to-local read workflow."""
+    from agent_relay.chatgpt_sender import BrowserChatGPTSender
+
+    if not is_chat_url(args.url):
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "detail": "chat-send-read requires an HTTPS /c/<conversation-id> URL"}), file=sys.stderr)
+        return 1
+    try:
+        message = build_chat_read_prompt(
+            sys.stdin.read(),
+            project_id=args.project_id,
+            work_order_id=args.work_order_id,
+        )
+    except (TypeError, ValueError) as exc:
+        print(json.dumps({"event": "configuration_error", "phase": "validate-request", "ok": False, "detail": str(exc)}), file=sys.stderr)
+        return 1
+
+    class Config:
+        chat_url = args.url
+        require_fixed_chat_url = False
+        close_after_submit = False
+        post_submit_delay = 0
+
+    result = BrowserChatGPTSender(Config()).submit(message)
+    if result.ok and result.verified:
+        print(json.dumps({"event": "chat_submitted", "transport": "CHATGPT_DOM_READ", "project_id": args.project_id, "work_order_id": args.work_order_id, "detail": result.detail}, ensure_ascii=False))
+        return 0
+    print(json.dumps({"event": getattr(result, "category", "chat_submission_error"), "transport": "CHATGPT_DOM_READ", "ok": False, "detail": result.detail}, ensure_ascii=False), file=sys.stderr)
     return 1
 
 
@@ -713,14 +745,14 @@ def main(argv=None) -> int:
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--stale-seconds", type=int, default=90)
     sub = parser.add_subparsers(dest="command", required=True)
-    auth_parser = sub.add_parser("auth")
+    auth_parser = sub.add_parser("auth", help="archived Gmail OAuth setup; not used by the official Chat-only workflow")
     auth_parser.add_argument("--client")
     sub.add_parser("init")
     guide_parser = sub.add_parser("install-guide", help="install the generic Agent integration guide into a project root")
     guide_parser.add_argument("--project-root", required=True)
     guide_parser.add_argument("--filename", default=GUIDE_FILENAME)
     guide_parser.add_argument("--force", action="store_true")
-    sub.add_parser("once")
+    sub.add_parser("once", help="archived Gmail receive cycle")
     validate_parser = sub.add_parser("validate-request", aliases=["validate-only", "dry-run"], help="validate a request locally without READY, Chrome, Gmail, network, or external send")
     validate_parser.add_argument("--request", required=True, help="request directory or request.json path")
     ready_parser = sub.add_parser("create-ready", help="validate locally and create READY without external send")
@@ -730,9 +762,13 @@ def main(argv=None) -> int:
     chat_parser.add_argument("--close-after-submit", action="store_true")
     chat_parser.add_argument("--close-delay", type=int, default=DEFAULT_WORKFLOW_WINDOW_SECONDS)
     chat_parser.add_argument("--correlation-id", default="", help="optional per-round routing ID to append mechanically")
+    read_send_parser = sub.add_parser("chat-send-read", help="official ChatGPT-only send; pair with agent-relay chat-read-once")
+    read_send_parser.add_argument("--url", required=True, help="HTTPS ChatGPT /c/<conversation-id> URL")
+    read_send_parser.add_argument("--project-id", required=True)
+    read_send_parser.add_argument("--work-order-id", required=True)
     request_parser = sub.add_parser("submit", aliases=["chat-send-request"], help="submit a READY request to ChatGPT; this is the external-send stage")
     request_parser.add_argument("--request", required=True, help="outbox request directory or request.json path")
-    poll_parser = sub.add_parser("poll", help="poll Gmail for a previously submitted request")
+    poll_parser = sub.add_parser("poll", help="archived: poll Gmail for a previously submitted request")
     poll_parser.add_argument("--request", required=True, help="outbox request directory or request.json path")
     poll_parser.add_argument("--max-seconds", type=int, default=DEFAULT_POLL_MAX_SECONDS)
     poll_parser.add_argument("--interval-seconds", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS)
@@ -743,7 +779,7 @@ def main(argv=None) -> int:
     register_parser.add_argument("--confirm-replace", action="store_true", help="explicitly approve replacing the current active URL")
     list_parser = sub.add_parser("list-chat-urls", help="list locally registered ChatGPT URLs for a project")
     list_parser.add_argument("--project-id", required=True)
-    test_parser = sub.add_parser("chat-test", help="send, close ChatGPT after a delay, then poll Gmail")
+    test_parser = sub.add_parser("chat-test", help="archived: send, close ChatGPT after a delay, then poll Gmail")
     test_parser.add_argument("--url", default="", help="optional explicit HTTPS ChatGPT URL; otherwise use the latest project registry URL")
     test_parser.add_argument("--workflow-window", type=int, default=None, help="set both ChatGPT page lifetime and Gmail maximum wait; default 360")
     test_parser.add_argument("--close-delay", type=int, default=DEFAULT_WORKFLOW_WINDOW_SECONDS, help="compatibility override for ChatGPT page lifetime")
@@ -780,6 +816,8 @@ def main(argv=None) -> int:
             return create_ready_command(args)
         if args.command == "chat-send":
             return chat_send(args)
+        if args.command == "chat-send-read":
+            return chat_send_read(args)
         if args.command in {"submit", "chat-send-request"}:
             return chat_send_request(args)
         if args.command == "poll":

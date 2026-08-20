@@ -1,4 +1,8 @@
-"""Minimal two-shot Gmail relay: poll once, run one worker, retry at most twice."""
+"""AgentRelay package.
+
+The official return transport is ChatGPT assistant -> Python/CDP reader.
+The Gmail relay remains available only as archived compatibility code.
+"""
 
 from .protocol import (AuditAction, AuditDecision, AuthorityClass, Disposition,
                        MessageKind, ProtocolEnvelope, ProtocolError,

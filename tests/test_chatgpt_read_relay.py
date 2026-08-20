@@ -16,6 +16,7 @@ from agent_relay.chatgpt_read_relay import (
     parse_outbound_envelope,
     payload_sha256,
 )
+from gmail_courier.protocol import build_chat_read_prompt
 
 
 def envelope(project: str = "GENERIC", work_order: str = "WO-001", payload: dict | None = None) -> str:
@@ -77,6 +78,17 @@ class FakePage:
 
 
 class ChatGPTReadRelayTests(unittest.TestCase):
+    def test_official_chat_only_prompt_has_no_gmail_contract(self):
+        prompt = build_chat_read_prompt(
+            "Return the current status.",
+            project_id="GENERIC",
+            work_order_id="WO-001",
+        )
+        self.assertIn("AGENTRELAY_OUTBOUND/1", prompt)
+        self.assertIn("Do not send Gmail", prompt)
+        self.assertNotIn("GMAIL RESPONSE CONTRACT", prompt)
+        self.assertTrue(prompt.isascii())
+
     def test_valid_envelope_and_canonical_hash(self):
         text = envelope()
         parsed = parse_outbound_envelope(text, project_id="GENERIC")
