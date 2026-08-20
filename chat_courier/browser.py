@@ -241,8 +241,22 @@ class ChatSession:
             dom.submit_composer(composer)
         except Exception as exc: raise BrowserError(f"ChatGPT input or submit failed: {exc}") from exc
         marker = f"REQUEST_ID={self.request.request_id}"; deadline = time.monotonic() + 30
+        # Some ChatGPT UI revisions accept a button click visually but leave
+        # the draft in the composer. Give the click a short opportunity to
+        # create a user turn, then use Enter once only while the draft is
+        # demonstrably still present. This cannot duplicate a submitted turn:
+        # a real send clears the composer before this fallback is attempted.
+        click_grace = time.monotonic() + 2
         while time.monotonic() < deadline:
             if dom.submission_visible(marker, composer): return baseline
+            if time.monotonic() >= click_grace:
+                try:
+                    draft = composer.input_value() if composer.evaluate("el => el.tagName") == "TEXTAREA" else composer.inner_text()
+                    if marker in draft:
+                        composer.press("Enter")
+                except Exception:
+                    pass
+                click_grace = deadline + 1
             self.page.wait_for_timeout(400)
         try: composer.fill("", timeout=3000)
         except Exception: pass
