@@ -17,6 +17,17 @@ def event(request: Request, name: str, **values: Any) -> None:
     payload = {"event": name, "project_id": request.project_id, "request_id": request.request_id, **values}
     with (request.directory / "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle: handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 def receipt(request: Request, state: str, detail: str, **values: Any) -> None:
-    atomic_json(receipt_path(request), {"version": 1, "project_id": request.project_id, "request_id": request.request_id, "fingerprint": request.fingerprint, "state": state, "detail": detail, "workflow_window_seconds": request.workflow_window_seconds, **values})
+    # Queue provenance survives later state transitions such as
+    # request_submitted and response_received, so an Agent can audit both the
+    # waiting and browser portions from the final receipt.
+    preserved: dict[str, Any] = {}
+    path = receipt_path(request)
+    try:
+        old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if old.get("fingerprint") == request.fingerprint:
+            preserved = {key: value for key, value in old.items() if key.startswith("queue_") or key in {"ahead_count", "estimated_wait_upper_bound_seconds", "current_owner", "execution_started_at"}}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    atomic_json(path, {"version": 1, "project_id": request.project_id, "request_id": request.request_id, "fingerprint": request.fingerprint, "state": state, "detail": detail, "workflow_window_seconds": request.workflow_window_seconds, "queue_wait_seconds": request.queue_wait_seconds, **preserved, **values})
 def save_response(request: Request, body: str) -> Path:
     path = request.directory / "response.txt"; temporary = path.with_suffix(".txt.tmp"); temporary.write_text(body, encoding="utf-8", newline="\n"); os.replace(temporary, path); return path
