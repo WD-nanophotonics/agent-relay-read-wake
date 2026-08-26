@@ -14,12 +14,16 @@ from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, Validation
 from .protocol import build_correction, build_prompt, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import event, load_receipt, receipt, save_response
+from .workflow import (
+    RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
+    request_status, wait_status,
+)
 
 
 COURIER_SOURCE_ROOT = Path(__file__).resolve().parent.parent
 _BUILD_COMPONENTS = (
     "cli.py", "browser.py", "model.py", "protocol.py", "queue.py",
-    "owner.py", "liveness.py", "storage.py",
+    "owner.py", "liveness.py", "storage.py", "workflow.py",
 )
 
 
@@ -491,6 +495,77 @@ def run_command(args: argparse.Namespace) -> int:
         return result
 
 
+
+def capabilities_command(args: argparse.Namespace) -> int:
+    emit("courier_capabilities", ok=True, phase="control", **capabilities())
+    return 0
+
+
+def configure_project_command(args: argparse.Namespace) -> int:
+    try:
+        value = configure_project(args.project_id, args.outbox_root, args.artifact_root,
+                                  args.max_attachments, args.max_single_bytes, args.max_total_bytes)
+    except ValidationError as exc:
+        emit("configuration_error", ok=False, phase="configure_project", detail=str(exc))
+        return 2
+    emit("courier_project_configured", ok=True, phase="configure_project", **value)
+    return 0
+
+
+def prepare_command(args: argparse.Namespace) -> int:
+    try:
+        message = Path(args.message_file).read_text(encoding="utf-8-sig")
+        value = prepare_request(
+            args.project_id, args.idempotency_key, message, args.attachment,
+            workflow_window_seconds=args.workflow_window_seconds,
+            queue_wait_seconds=args.queue_wait_seconds,
+            task_difficulty=args.task_difficulty, instruction_level=args.instruction_level,
+        )
+    except (OSError, UnicodeDecodeError, ValidationError) as exc:
+        emit("courier_prepare_failed", ok=False, phase="prepare", detail=str(exc),
+             error_code="COURIER_PREPARE_INVALID", retry_allowed=False,
+             safe_next_action="correct_prepare_input")
+        return 2
+    emit("courier_prepared", ok=True, phase="prepare", **value)
+    return 0
+
+
+def status_command(args: argparse.Namespace) -> int:
+    try:
+        value = request_status(args.request_directory)
+    except ValidationError as exc:
+        emit("courier_status_failed", ok=False, phase="status", detail=str(exc))
+        return 2
+    emit("courier_status", ok=True, phase="status", **value)
+    return 0
+
+
+def wait_command(args: argparse.Namespace) -> int:
+    try:
+        value = wait_status(args.request_directory, args.timeout)
+    except ValidationError as exc:
+        emit("courier_wait_failed", ok=False, phase="wait", detail=str(exc))
+        return 2
+    emit("courier_wait", ok=not value.get("wait_timeout", False), phase="wait", **value)
+    return 2 if value.get("wait_timeout") else 0
+
+
+def recover_command(args: argparse.Namespace) -> int:
+    try:
+        value = request_status(args.request_directory)
+    except ValidationError as exc:
+        emit("courier_recover_failed", ok=False, phase="recover", detail=str(exc))
+        return 2
+    if value["state"] == "response_received":
+        emit("response_duplicate", ok=True, phase="complete", **value)
+        return 0
+    if value["state"] not in RECOVERY_ONLY_STATES:
+        emit("courier_recover_failed", ok=False, phase="recover",
+             error_code="COURIER_RECOVERY_NOT_ALLOWED", retry_allowed=False,
+             safe_next_action="courier_status", **value)
+        return 2
+    return run_command(args)
+
 def _profile_for_request(request) -> str:
     """Report the same deterministic profile selection used by ChatSession."""
     import os
@@ -528,6 +603,32 @@ def main(argv: list[str] | None = None) -> int:
     confirm = sub.add_parser("confirm-register", help="explicitly confirm a pending ChatGPT URL registration")
     confirm.add_argument("--project-id", required=True); confirm.add_argument("--confirmation-id", required=True)
     confirm.add_argument("--basis", required=True, choices=["user_direct", "prior_authorization"]); confirm.set_defaults(handler=confirm_register_command)
+    typed_capabilities = sub.add_parser("courier_capabilities", help="show typed Courier capabilities")
+    typed_capabilities.set_defaults(handler=capabilities_command)
+    configure = sub.add_parser("configure-project", help="administratively bind one project policy")
+    configure.add_argument("--project-id", required=True); configure.add_argument("--outbox-root", required=True)
+    configure.add_argument("--artifact-root", action="append", required=True)
+    configure.add_argument("--max-attachments", type=int, required=True)
+    configure.add_argument("--max-single-bytes", type=int, required=True)
+    configure.add_argument("--max-total-bytes", type=int, required=True)
+    configure.set_defaults(handler=configure_project_command)
+    prepare = sub.add_parser("courier_prepare", help="idempotently construct an immutable request")
+    prepare.add_argument("--project-id", required=True); prepare.add_argument("--idempotency-key", required=True)
+    prepare.add_argument("--message-file", required=True); prepare.add_argument("--attachment", action="append", default=[])
+    prepare.add_argument("--workflow-window-seconds", type=int, default=600)
+    prepare.add_argument("--queue-wait-seconds", type=int, default=3600)
+    prepare.add_argument("--task-difficulty", choices=["normal", "hard", "challenge"], default="normal")
+    prepare.add_argument("--instruction-level", choices=["normal", "detailed", "manual_book"], default="normal")
+    prepare.set_defaults(handler=prepare_command)
+    dispatch = sub.add_parser("courier_dispatch", help="dispatch or automatically resume one request")
+    dispatch.add_argument("request_directory"); dispatch.set_defaults(handler=run_command)
+    typed_status = sub.add_parser("courier_status", help="read one request state")
+    typed_status.add_argument("request_directory"); typed_status.set_defaults(handler=status_command)
+    typed_wait = sub.add_parser("courier_wait", help="wait without dispatching")
+    typed_wait.add_argument("request_directory"); typed_wait.add_argument("--timeout", type=int, default=30)
+    typed_wait.set_defaults(handler=wait_command)
+    typed_recover = sub.add_parser("courier_recover", help="recover an already submitted request")
+    typed_recover.add_argument("request_directory"); typed_recover.set_defaults(handler=recover_command)
     args = parser.parse_args(argv)
     return args.handler(args)
 
