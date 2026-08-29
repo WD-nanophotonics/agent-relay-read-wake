@@ -10,7 +10,7 @@ from typing import Any
 
 from .locking import RuntimeLock
 from .model import IDENTIFIER, ValidationError, _load_registry, atomic_json, load_request, runtime_root
-from .storage import load_receipt
+from .storage import load_receipt, request_was_submitted
 
 PROJECTS_SCHEMA = "chat-courier-projects-v1"
 PREPARED_SCHEMA = "chat-courier-prepared-v1"
@@ -200,11 +200,13 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
     request = load_request(request_directory)
     receipt = load_receipt(request)
     state = receipt.get("state") if receipt else "prepared"
+    recovery_only = (state in RECOVERY_ONLY_STATES
+                     or (state in {"browser_error", "courier_error"} and request_was_submitted(request)))
     return {
         "project_id": request.project_id, "request_id": request.request_id,
         "request_directory": str(request.directory), "state": state,
-        "terminal": state in TERMINAL_STATES,
-        "recovery_only_required": state in RECOVERY_ONLY_STATES,
+        "terminal": state in TERMINAL_STATES and not recovery_only,
+        "recovery_only_required": recovery_only,
         "response_path": str(request.directory / "response.txt") if state == "response_received" else None,
         "fingerprint": request.fingerprint,
     }

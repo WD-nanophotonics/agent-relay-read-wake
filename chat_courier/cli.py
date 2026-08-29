@@ -14,7 +14,7 @@ from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, Validation
 from .protocol import build_prompt, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (event, load_receipt, load_response_capture, load_response_cursor,
-                      receipt, save_response, save_response_capture)
+                      receipt, request_was_submitted, save_response, save_response_capture)
 from .workflow import (
     RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
     request_status, wait_status,
@@ -292,7 +292,7 @@ def _run_after_queue(request, previous: dict | None) -> int:
     event(request, "request_validated", phase="validate")
     emit("request_validated", ok=True, phase="validate", project_id=request.project_id, request_id=request.request_id, workflow_window_seconds=request.workflow_window_seconds, workflow_window_scope="post_submission_response", queue_wait_seconds=request.queue_wait_seconds, active_setup_budget_seconds=ACTIVE_SETUP_BUDGET_SECONDS, minimum_caller_window_seconds=minimum_caller_window_seconds(request.queue_wait_seconds, request.workflow_window_seconds))
     deadline = time.monotonic() + request.workflow_window_seconds
-    submitted = _submission_confirmed(previous)
+    submitted = _submission_confirmed(previous) or request_was_submitted(request)
     if not submitted:
         emit("submission_intent_writing", ok=True, phase="submit", project_id=request.project_id, request_id=request.request_id, browser_started=False)
         event(request, "submission_intent_writing", phase="submit")
@@ -602,7 +602,7 @@ def recover_command(args: argparse.Namespace) -> int:
     if value["state"] == "response_received":
         emit("response_duplicate", ok=True, phase="complete", **value)
         return 0
-    if value["state"] not in RECOVERY_ONLY_STATES:
+    if not value["recovery_only_required"]:
         emit("courier_recover_failed", ok=False, phase="recover",
              error_code="COURIER_RECOVERY_NOT_ALLOWED", retry_allowed=False,
              safe_next_action="courier_status", **value)

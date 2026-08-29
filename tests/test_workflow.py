@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from chat_courier.model import ValidationError
+from chat_courier.model import ValidationError, load_request
+from chat_courier.storage import event, receipt
 from chat_courier.workflow import capabilities, configure_project, prepare_request, request_status
 
 
@@ -65,3 +66,15 @@ def test_capabilities_exposes_policy_not_url_or_profile(tmp_path, monkeypatch):
     assert value["projects"] == ["TEST"]
     assert value["arbitrary_url"] is False and value["arbitrary_profile"] is False
     assert "chat_url" not in value["project_policies"]["TEST"]
+
+
+def test_post_submission_browser_close_remains_same_request_recoverable(tmp_path, monkeypatch):
+    configured(tmp_path, monkeypatch)
+    prepared = prepare_request("TEST", "RECOVER-1", "hello")
+    request = load_request(prepared["request_directory"])
+    event(request, "request_submitted", phase="submit")
+    receipt(request, "courier_error", "page was closed")
+    value = request_status(request.directory)
+    assert value["state"] == "courier_error"
+    assert value["terminal"] is False
+    assert value["recovery_only_required"] is True

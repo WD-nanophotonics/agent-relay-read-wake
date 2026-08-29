@@ -16,6 +16,21 @@ def load_receipt(request: Request) -> dict[str, Any] | None:
 def event(request: Request, name: str, **values: Any) -> None:
     payload = {"event": name, "project_id": request.project_id, "request_id": request.request_id, **values}
     with (request.directory / "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle: handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+def request_was_submitted(request: Request) -> bool:
+    path = request.directory / "events.jsonl"
+    if not path.exists(): return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try: value = json.loads(line)
+                except json.JSONDecodeError: continue
+                if (value.get("event") == "request_submitted"
+                        and value.get("project_id") == request.project_id
+                        and value.get("request_id") == request.request_id):
+                    return True
+    except OSError as exc:
+        raise ValidationError(f"cannot read request events: {path}") from exc
+    return False
 def receipt(request: Request, state: str, detail: str, **values: Any) -> None:
     # Queue provenance survives later state transitions such as
     # request_submitted and response_received, so an Agent can audit both the
