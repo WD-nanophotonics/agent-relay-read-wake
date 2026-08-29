@@ -72,6 +72,25 @@ class CliPreflightTests(unittest.TestCase):
         self.assertIsNone(body)
         self.assertIn("does not match", values["protocol_detail"])
 
+    def test_chat_ui_errors_are_captured_but_not_accepted_as_replies(self):
+        messages = (
+            "Connection interrupted. Waiting for the complete answer",
+            "This content can’t be shown\nWe’re especially careful with cybersecurity requests.",
+        )
+        for index, message in enumerate(messages):
+            class Session:
+                def wait_for_reply(self, *_args, **_kwargs):
+                    return AssistantTurn(f"assistant-{index}", message, index)
+            with tempfile.TemporaryDirectory() as value, patch(
+                "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+            ):
+                root = self.request_directory(Path(value)); request = load_request(root)
+                self.assertEqual(_capture_response(Session(), request, set(), 10.0), "response_captured")
+                outcome, body, values = _parse_captured_response(request)
+            self.assertEqual(outcome, "response_ui_error")
+            self.assertIsNone(body)
+            self.assertIn("UI error", values["protocol_detail"])
+
     def test_fake_page_round_trip_closes_before_offline_parse(self):
         lifecycle = []
         class Session:

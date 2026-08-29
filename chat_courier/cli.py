@@ -11,7 +11,7 @@ import time
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
-from .protocol import REPLY_PROTOCOL, build_prompt, parse_reply
+from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (archive_response_capture, event, load_receipt, load_response_capture,
                       load_response_cursor, receipt, request_was_submitted,
@@ -196,6 +196,8 @@ def _parse_captured_response(request) -> tuple[str, str | None, dict[str, object
     capture, text = loaded
     values = {"raw_path": capture["raw_path"], "raw_sha256": capture["raw_sha256"],
               "assistant_identity": capture["assistant_identity"]}
+    if is_chat_ui_error(text):
+        return "response_ui_error", None, {**values, "protocol_detail": "Chat returned a UI error instead of a reply"}
     try:
         reply = parse_reply(text, request)
     except ValidationError as exc:
@@ -245,6 +247,7 @@ def _submission_confirmed(previous: dict | None) -> bool:
     return bool(previous and previous.get("state") in {
         "request_submitted", "waiting_for_response", "submission_unconfirmed",
         "response_timeout", "response_captured", "response_protocol_error",
+        "response_ui_error",
     })
 
 
