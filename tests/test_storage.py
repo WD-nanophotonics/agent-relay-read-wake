@@ -75,6 +75,30 @@ class StorageTests(unittest.TestCase):
                 self.assertEqual(resend_once_command(args), 2)
                 run.assert_not_called()
 
+    def test_resend_archives_a_previously_accepted_ui_error(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            (request.directory / "events.jsonl").write_text(
+                json.dumps({"event": "request_submitted", "project_id": "P",
+                            "request_id": "P-1"}) + "\n", encoding="utf-8")
+            (request.directory / "response.txt").write_text(
+                "This content can't be shown", encoding="utf-8")
+            (request.directory / "response.raw.txt").write_text(
+                "This content can't be shown", encoding="utf-8")
+            (request.directory / "response-capture.json").write_text("{}", encoding="utf-8")
+            receipt(request, "response_received", "legacy false positive")
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(resend_once_command(args), 0)
+                self.assertTrue(args.resend_once)
+                run.assert_called_once_with(args)
+            self.assertFalse((request.directory / "response.txt").exists())
+            self.assertEqual(
+                (request.directory / "attempt-1-response.txt").read_text(encoding="utf-8"),
+                "This content can't be shown",
+            )
+
     def test_queue_provenance_survives_final_receipt_transition(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.request(Path(value))

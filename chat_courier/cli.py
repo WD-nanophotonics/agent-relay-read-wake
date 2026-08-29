@@ -484,7 +484,8 @@ def run_command(args: argparse.Namespace) -> int:
     except ValidationError as exc:
         emit("validation_failed", ok=False, phase="validate", detail=str(exc))
         return 2
-    if previous and previous.get("state") == "response_received":
+    if (previous and previous.get("state") == "response_received"
+            and not bool(getattr(args, "resend_once", False))):
         emit("response_duplicate", ok=True, phase="complete", project_id=request.project_id, request_id=request.request_id, response_path=str(request.directory / "response.txt"))
         return 0
     try:
@@ -629,10 +630,6 @@ def resend_once_command(args: argparse.Namespace) -> int:
     try:
         request = load_request(args.request_directory)
         count = submission_count(request)
-        if (request.directory / "response.txt").exists():
-            emit("response_duplicate", ok=True, phase="complete", project_id=request.project_id,
-                 request_id=request.request_id, submission_count=count)
-            return 0
         if count != 1:
             emit("courier_resend_refused", ok=False, phase="resend",
                  error_code="COURIER_RESEND_LIMIT_OR_STATE", retry_allowed=False,

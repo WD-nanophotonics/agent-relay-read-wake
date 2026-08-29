@@ -101,7 +101,7 @@ def save_latest_response_capture(request: Request, *, identity: str, index: int,
 
 def archive_response_capture(request: Request, attempt: int) -> None:
     """Preserve a rejected capture before a bounded resend overwrites it."""
-    for name in ("response.raw.txt", "response-capture.json"):
+    for name in ("response.txt", "response.raw.txt", "response-capture.json"):
         source = request.directory / name
         if source.exists():
             target = request.directory / f"attempt-{attempt}-{name}"
