@@ -111,8 +111,8 @@ class CliPreflightTests(unittest.TestCase):
                 self.assert_recovery = self.recovery
                 lifecycle.append("opened"); return self
             def __exit__(self, *_): lifecycle.append("closed"); return False
-            def wait_for_reply(self, baseline, deadline, *, latest=False):
-                self.baseline, self.latest = baseline, latest
+            def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
+                self.baseline, self.after_user_marker = baseline, after_user_marker
                 lifecycle.append("captured")
                 return AssistantTurn("latest-a", "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=OTHER\nBEGIN_RESPONSE\nbody\nEND_RESPONSE", 9)
             def submit(self, *_): raise AssertionError("capture-latest must never send")

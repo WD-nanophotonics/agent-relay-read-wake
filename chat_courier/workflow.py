@@ -230,7 +230,7 @@ def capabilities() -> dict[str, Any]:
         "schema": "chat-courier-capabilities-v1",
         "operations": ["courier_capabilities", "courier_prepare", "courier_dispatch",
                        "courier_status", "courier_wait", "courier_recover",
-                       "courier_capture_latest"],
+                       "courier_capture_latest", "courier_resend_once"],
         "arbitrary_url": False, "arbitrary_profile": False,
         "projects": sorted(projects), "project_policies": projects,
     }

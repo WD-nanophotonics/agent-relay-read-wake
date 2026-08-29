@@ -17,8 +17,12 @@ def event(request: Request, name: str, **values: Any) -> None:
     payload = {"event": name, "project_id": request.project_id, "request_id": request.request_id, **values}
     with (request.directory / "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle: handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 def request_was_submitted(request: Request) -> bool:
+    return submission_count(request) > 0
+
+def submission_count(request: Request) -> int:
     path = request.directory / "events.jsonl"
-    if not path.exists(): return False
+    if not path.exists(): return 0
+    count = 0
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -27,10 +31,10 @@ def request_was_submitted(request: Request) -> bool:
                 if (value.get("event") == "request_submitted"
                         and value.get("project_id") == request.project_id
                         and value.get("request_id") == request.request_id):
-                    return True
+                    count += 1
     except OSError as exc:
         raise ValidationError(f"cannot read request events: {path}") from exc
-    return False
+    return count
 def receipt(request: Request, state: str, detail: str, **values: Any) -> None:
     # Queue provenance survives later state transitions such as
     # request_submitted and response_received, so an Agent can audit both the
@@ -86,9 +90,23 @@ def _save_capture(request: Request, *, identity: str, index: int, text: str,
 def save_response_capture(request: Request, *, identity: str, index: int, text: str) -> dict[str, Any]:
     return _save_capture(request, identity=identity, index=index, text=text,
                          raw_name="response.raw.txt", manifest_name="response-capture.json")
-def save_latest_response_capture(request: Request, *, identity: str, index: int, text: str) -> dict[str, Any]:
-    return _save_capture(request, identity=identity, index=index, text=text,
-                         raw_name="latest-response.raw.txt", manifest_name="latest-response-capture.json")
+def save_latest_response_capture(request: Request, *, identity: str, index: int, text: str,
+                                 user_turn_found: bool = True) -> dict[str, Any]:
+    value = _save_capture(request, identity=identity, index=index, text=text,
+                          raw_name="latest-response.raw.txt", manifest_name="latest-response-capture.json")
+    value.update({"latest_user_turn_found": user_turn_found,
+                  "post_submission_reply_found": True})
+    atomic_json(request.directory / "latest-response-capture.json", value)
+    return value
+
+def archive_response_capture(request: Request, attempt: int) -> None:
+    """Preserve a rejected capture before a bounded resend overwrites it."""
+    for name in ("response.raw.txt", "response-capture.json"):
+        source = request.directory / name
+        if source.exists():
+            target = request.directory / f"attempt-{attempt}-{name}"
+            if not target.exists():
+                os.replace(source, target)
 def load_response_capture(request: Request) -> tuple[dict[str, Any], str] | None:
     path = response_capture_path(request)
     if not path.exists(): return None

@@ -13,9 +13,10 @@ from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
 from .protocol import REPLY_PROTOCOL, build_prompt, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
-from .storage import (event, load_receipt, load_response_capture, load_response_cursor,
-                      receipt, request_was_submitted, save_latest_response_capture,
-                      save_response, save_response_capture)
+from .storage import (archive_response_capture, event, load_receipt, load_response_capture,
+                      load_response_cursor, receipt, request_was_submitted,
+                      save_latest_response_capture, save_response, save_response_capture,
+                      submission_count)
 from .workflow import (
     RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
     request_status, wait_status,
@@ -167,7 +168,10 @@ def confirm_register_command(args: argparse.Namespace) -> int:
 def _capture_response(session: ChatSession, request, baseline: set[str] | None, deadline: float,
                       *, legacy_recovery: bool = False) -> str:
     """Capture one completed assistant turn before the browser is closed."""
-    candidate = session.wait_for_reply(baseline, deadline, after_latest_user=legacy_recovery)
+    options: dict[str, object] = {"after_latest_user": legacy_recovery}
+    if legacy_recovery:
+        options["after_user_marker"] = f"REQUEST_ID={request.request_id}"
+    candidate = session.wait_for_reply(baseline, deadline, **options)
     if candidate is None:
         return "response_timeout"
     capture = save_response_capture(
@@ -205,13 +209,13 @@ def _upload_status(request, name: str, **values) -> None:
     emit(name, ok=name not in failed, phase="upload", project_id=request.project_id, request_id=request.request_id, **values)
 
 
-def _run_session_once(request, submitted: bool, reply_window_seconds: int) -> str:
+def _run_session_once(request, submitted: bool, reply_window_seconds: int, *, resend_once: bool = False) -> str:
     emit("browser_launch_requested", ok=True, phase="browser", project_id=request.project_id, request_id=request.request_id)
     event(request, "browser_launch_requested", phase="browser")
     with ChatSession(request, recovery=submitted, status_callback=lambda name, **values: _upload_status(request, name, **values)) as session:
         event(request, "browser_started", phase="browser", profile=str(session.profile), attached_existing=session.attached_existing)
         emit("browser_started", ok=True, phase="browser", project_id=request.project_id, request_id=request.request_id, attached_existing=session.attached_existing)
-        if submitted:
+        if submitted and not resend_once:
             baseline = load_response_cursor(request)
             legacy_recovery = baseline is None
             receipt(request, "waiting_for_response", "Resuming read-only search for an already submitted request", attached_existing=session.attached_existing)
@@ -220,9 +224,14 @@ def _run_session_once(request, submitted: bool, reply_window_seconds: int) -> st
         else:
             baseline = session.submit(build_prompt(request), request.attachments)
             legacy_recovery = False
-            receipt(request, "request_submitted", "ChatGPT user turn was visibly confirmed", owner_pid=session.owner.record.owner_pid if session.owner.record else None, owner_nonce=session.owner.record.owner_nonce if session.owner.record else None)
-            event(request, "request_submitted", phase="submit")
-            emit("request_submitted", ok=True, phase="submit", project_id=request.project_id, request_id=request.request_id)
+            attempt = submission_count(request) + 1
+            receipt(request, "request_submitted", "ChatGPT user turn was visibly confirmed",
+                    submission_attempt=attempt,
+                    owner_pid=session.owner.record.owner_pid if session.owner.record else None,
+                    owner_nonce=session.owner.record.owner_nonce if session.owner.record else None)
+            event(request, "request_submitted", phase="submit", submission_attempt=attempt)
+            emit("request_submitted", ok=True, phase="submit", project_id=request.project_id,
+                 request_id=request.request_id, submission_attempt=attempt)
             receipt(request, "waiting_for_response", "Waiting for one completed assistant reply")
             emit("response_waiting", ok=True, phase="receive", project_id=request.project_id, request_id=request.request_id, resumed=False)
             # The configured workflow window is the Chat response allowance,
@@ -288,7 +297,7 @@ def _write_not_ready_diagnostic(request, exc: ChatComposerNotReady) -> str:
     return str(path)
 
 
-def _run_after_queue(request, previous: dict | None) -> int:
+def _run_after_queue(request, previous: dict | None, *, resend_once: bool = False) -> int:
     event(request, "request_validated", phase="validate")
     emit("request_validated", ok=True, phase="validate", project_id=request.project_id, request_id=request.request_id, workflow_window_seconds=request.workflow_window_seconds, workflow_window_scope="post_submission_response", queue_wait_seconds=request.queue_wait_seconds, active_setup_budget_seconds=ACTIVE_SETUP_BUDGET_SECONDS, minimum_caller_window_seconds=minimum_caller_window_seconds(request.queue_wait_seconds, request.workflow_window_seconds))
     deadline = time.monotonic() + request.workflow_window_seconds
@@ -303,7 +312,8 @@ def _run_after_queue(request, previous: dict | None) -> int:
         if load_response_capture(request) is None:
             while True:
                 try:
-                    outcome = _run_session_once(request, submitted, request.workflow_window_seconds)
+                    outcome = _run_session_once(request, submitted, request.workflow_window_seconds,
+                                                resend_once=resend_once)
                     break
                 except OwnerBusy as exc:
                     if not submitted:
@@ -501,7 +511,8 @@ def run_command(args: argparse.Namespace) -> int:
         return terminal
     assert queue is not None
     try:
-        result = _run_after_queue(request, previous)
+        result = _run_after_queue(request, previous,
+                                  resend_once=bool(getattr(args, "resend_once", False)))
     except KeyboardInterrupt:
         try:
             current = load_receipt(request)
@@ -610,6 +621,29 @@ def recover_command(args: argparse.Namespace) -> int:
     return run_command(args)
 
 
+def resend_once_command(args: argparse.Namespace) -> int:
+    """Resend the same immutable request once after bounded read-only recovery."""
+    try:
+        request = load_request(args.request_directory)
+        count = submission_count(request)
+        if (request.directory / "response.txt").exists():
+            emit("response_duplicate", ok=True, phase="complete", project_id=request.project_id,
+                 request_id=request.request_id, submission_count=count)
+            return 0
+        if count != 1:
+            emit("courier_resend_refused", ok=False, phase="resend",
+                 error_code="COURIER_RESEND_LIMIT_OR_STATE", retry_allowed=False,
+                 project_id=request.project_id, request_id=request.request_id,
+                 submission_count=count)
+            return 2
+        archive_response_capture(request, 1)
+    except ValidationError as exc:
+        emit("courier_resend_refused", ok=False, phase="resend", detail=str(exc))
+        return 2
+    args.resend_once = True
+    return run_command(args)
+
+
 def capture_latest_command(args: argparse.Namespace) -> int:
     """Capture the latest completed assistant turn without sending anything."""
     try:
@@ -622,8 +656,10 @@ def capture_latest_command(args: argparse.Namespace) -> int:
                  request_id=request.request_id)
             return 1
         with ChatSession(request, recovery=True) as session:
+            baseline = load_response_cursor(request)
             candidate = session.wait_for_reply(
-                None, time.monotonic() + min(60, request.workflow_window_seconds), latest=True,
+                baseline, time.monotonic() + min(60, request.workflow_window_seconds),
+                after_user_marker=(f"REQUEST_ID={request.request_id}" if baseline is None else None),
             )
             if candidate is None:
                 emit("courier_capture_latest_empty", ok=False, phase="capture_latest",
@@ -633,6 +669,7 @@ def capture_latest_command(args: argparse.Namespace) -> int:
                 return 1
             capture = save_latest_response_capture(
                 request, identity=candidate.identity, index=candidate.index, text=candidate.text,
+                user_turn_found=True,
             )
     except (ValidationError, OwnerBusy, BrowserError) as exc:
         emit("courier_capture_latest_failed", ok=False, phase="capture_latest",
@@ -656,6 +693,9 @@ def capture_latest_command(args: argparse.Namespace) -> int:
         "raw_sha256": capture["raw_sha256"], "assistant_identity": capture["assistant_identity"],
         "envelope_present": envelope_present, "request_match": request_match,
         "protocol_detail": protocol_detail, "message_sent": False,
+        "latest_user_turn_found": capture["latest_user_turn_found"],
+        "post_submission_reply_found": capture["post_submission_reply_found"],
+        "submission_count": submission_count(request),
     }
     event(request, "latest_response_captured", phase="capture_latest", **values)
     emit("courier_latest_response_captured", ok=True, phase="capture_latest",
@@ -725,6 +765,8 @@ def main(argv: list[str] | None = None) -> int:
     typed_wait.set_defaults(handler=wait_command)
     typed_recover = sub.add_parser("courier_recover", help="recover an already submitted request")
     typed_recover.add_argument("request_directory"); typed_recover.set_defaults(handler=recover_command)
+    resend_once = sub.add_parser("courier_resend_once", help="resend the same immutable request once")
+    resend_once.add_argument("request_directory"); resend_once.set_defaults(handler=resend_once_command)
     capture_latest = sub.add_parser("courier_capture_latest", help="capture the latest completed assistant reply without sending")
     capture_latest.add_argument("request_directory"); capture_latest.set_defaults(handler=capture_latest_command)
     args = parser.parse_args(argv)

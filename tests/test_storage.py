@@ -9,8 +9,9 @@ from unittest.mock import patch
 from chat_courier.model import ValidationError, load_request
 from chat_courier.storage import (load_receipt, load_response_capture, load_response_cursor,
                                   receipt, save_response, save_response_capture,
-                                  save_response_cursor)
-from chat_courier.cli import _safe_pre_browser_turn_recovery, _submission_confirmed
+                                  save_response_cursor, submission_count)
+from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confirmed,
+                              resend_once_command)
 
 
 class StorageTests(unittest.TestCase):
@@ -52,6 +53,27 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(_submission_confirmed({"state": "request_submitted"}))
         self.assertTrue(_submission_confirmed({"state": "submission_unconfirmed"}))
         self.assertTrue(_submission_confirmed({"state": "response_captured"}))
+
+    def test_same_request_resend_is_bounded_to_second_submission(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            event_path = request.directory / "events.jsonl"
+            event_path.write_text(json.dumps({"event": "request_submitted", "project_id": "P",
+                                              "request_id": "P-1"}) + "\n", encoding="utf-8")
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(resend_once_command(args), 0)
+                self.assertTrue(args.resend_once)
+                run.assert_called_once_with(args)
+            with event_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event": "request_submitted", "project_id": "P",
+                                         "request_id": "P-1"}) + "\n")
+            self.assertEqual(submission_count(request), 2)
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.run_command") as run:
+                self.assertEqual(resend_once_command(args), 2)
+                run.assert_not_called()
 
     def test_queue_provenance_survives_final_receipt_transition(self):
         with tempfile.TemporaryDirectory() as value:

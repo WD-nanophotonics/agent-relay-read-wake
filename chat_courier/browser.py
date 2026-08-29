@@ -385,6 +385,34 @@ class ChatDom:
                 result.append(AssistantTurn(identity, text, index))
         return user_seen, result
 
+    def assistant_turns_after_user_marker(self, marker: str) -> tuple[bool, list[AssistantTurn]]:
+        """Return assistant turns after the latest exact Courier user turn."""
+        result: list[AssistantTurn] = []; anchor_found = False
+        locator = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
+        try: count = locator.count()
+        except Exception as exc: raise BrowserError(f"conversation DOM is unavailable: {exc}") from exc
+        for index in range(count):
+            node = locator.nth(index)
+            try:
+                text = node.inner_text().strip()
+                role = (node.get_attribute("data-message-author-role") or "").lower()
+                testid = (node.get_attribute("data-testid") or "").lower()
+            except Exception:
+                continue
+            is_user = role == "user" or "conversation-turn-user" in testid
+            is_assistant = role == "assistant" or "conversation-turn-assistant" in testid
+            if is_user:
+                if marker in text:
+                    anchor_found = True; result = []
+                elif anchor_found:
+                    anchor_found = False; result = []
+                continue
+            if anchor_found and is_assistant and text:
+                try: identity = node.get_attribute("data-message-id") or f"{index}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+                except Exception: continue
+                result.append(AssistantTurn(identity, text, index))
+        return anchor_found, result
+
     def streaming(self) -> bool:
         try:
             if self.page.locator(self.stop_selector).count() and self.page.locator(self.stop_selector).first.is_visible(): return True
@@ -797,7 +825,8 @@ class ChatSession:
         return diagnostic
 
     def wait_for_reply(self, baseline: set[str] | None, deadline: float, *,
-                       after_latest_user: bool = False, latest: bool = False) -> AssistantTurn | None:
+                       after_latest_user: bool = False, latest: bool = False,
+                       after_user_marker: str | None = None) -> AssistantTurn | None:
         if self.page is None: raise BrowserError("browser session is not open")
         dom = ChatDom(self.page); previous: tuple[str, str] | None = None; stable = 0
         last_snapshot: dict[str, Any] = {}; sample_count = 0
@@ -805,7 +834,9 @@ class ChatSession:
             sample_count += 1
             self.owner.update("waiting_for_response")
             all_turns = dom.assistant_turns()
-            if latest:
+            if after_user_marker is not None:
+                anchor_found, turns = dom.assistant_turns_after_user_marker(after_user_marker)
+            elif latest:
                 turns = all_turns
                 anchor_found = True
             elif baseline is not None:
