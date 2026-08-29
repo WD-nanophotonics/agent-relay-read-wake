@@ -453,7 +453,29 @@ def run_command(args: argparse.Namespace) -> int:
     if previous and previous.get("state") == "response_received":
         emit("response_duplicate", ok=True, phase="complete", project_id=request.project_id, request_id=request.request_id, response_path=str(request.directory / "response.txt"))
         return 0
-    queue, terminal = _wait_for_queue(request, previous)
+    try:
+        queue, terminal = _wait_for_queue(request, previous)
+    except KeyboardInterrupt:
+        # The request has not crossed the browser boundary. Re-open its own
+        # queue identity only to remove the abandoned queued ticket.
+        cleanup = CourierQueue(request)
+        try:
+            cleanup.join(allow_active_recovery=True)
+            cleanup.complete()
+        except (QueueIntegrityError, RuntimeError, OSError):
+            pass
+        values = {
+            "interruption_stage": "pre_browser",
+            "interruption_signal": "SIGINT/CTRL_C",
+            "courier_pid": os.getpid(),
+            "parent_pid": os.getppid(),
+            "browser_started": False,
+            "safe_to_retry_same_request": True,
+        }
+        receipt(request, "courier_interrupted", "Courier received an external interrupt before browser ownership", **values)
+        event(request, "courier_interrupted", phase="interrupt", **values)
+        emit("courier_interrupted", ok=False, phase="interrupt", project_id=request.project_id, request_id=request.request_id, **values)
+        return 130
     if terminal is not None:
         return terminal
     assert queue is not None

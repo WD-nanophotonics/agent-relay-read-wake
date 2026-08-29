@@ -140,6 +140,25 @@ class CliPreflightTests(unittest.TestCase):
         self.assertTrue(receipt["safe_to_retry_same_request"])
         self.assertIn('"event": "courier_interrupted"', output.getvalue())
 
+    def test_keyboard_interrupt_while_queued_is_structured_and_releases_ticket(self):
+        class Queue:
+            completed = False
+            def __init__(self, request): pass
+            def join(self, **_): return QueueStatus("joined", ticket="ticket-1", position=2)
+            def complete(self): Queue.completed = True
+
+        with tempfile.TemporaryDirectory() as value, patch("chat_courier.cli.CourierQueue", Queue), patch("chat_courier.cli._wait_for_queue", side_effect=KeyboardInterrupt), patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["run", str(root)])
+            receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 130)
+        self.assertTrue(Queue.completed)
+        self.assertEqual(receipt["state"], "courier_interrupted")
+        self.assertEqual(receipt["interruption_stage"], "pre_browser")
+        self.assertTrue(receipt["safe_to_retry_same_request"])
+        self.assertNotIn("Traceback", output.getvalue())
+
     def test_dead_starting_owner_without_browser_is_safe_pre_browser_recovery(self):
         from chat_courier.cli import _safe_pre_browser_turn_recovery
         owner = OwnerRecord("P", "P-1", 9999, "nonce", "starting", "now")
