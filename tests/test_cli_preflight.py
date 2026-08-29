@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, PreSubmissionError
 from chat_courier.cli import _capture_response, _parse_captured_response, _run_session_once, main
-from chat_courier.model import load_request
+from chat_courier.model import ValidationError, load_request
 from chat_courier.owner import OwnerRecord
 from chat_courier.queue import QueueStatus
 
@@ -97,6 +97,50 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(parsed, "response_received")
         self.assertEqual(body, "next machine work order")
         self.assertEqual(lifecycle, ["opened", "captured", "closed", "parsed"])
+
+    def test_capture_latest_is_read_only_and_parses_after_window_close(self):
+        lifecycle = []
+        def offline_parse(*_args):
+            self.assertEqual(lifecycle[-1], "closed")
+            raise ValidationError("header mismatch")
+        class Session:
+            def __init__(self, request, *, recovery=False):
+                self.request = request
+                self.recovery = recovery
+            def __enter__(self):
+                self.assert_recovery = self.recovery
+                lifecycle.append("opened"); return self
+            def __exit__(self, *_): lifecycle.append("closed"); return False
+            def wait_for_reply(self, baseline, deadline, *, latest=False):
+                self.baseline, self.latest = baseline, latest
+                lifecycle.append("captured")
+                return AssistantTurn("latest-a", "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=OTHER\nBEGIN_RESPONSE\nbody\nEND_RESPONSE", 9)
+            def submit(self, *_): raise AssertionError("capture-latest must never send")
+
+        with tempfile.TemporaryDirectory() as value, patch("chat_courier.cli.ChatSession", Session), patch("chat_courier.cli.parse_reply", side_effect=offline_parse), patch("chat_courier.cli.read_owner", return_value=None), patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["courier_capture_latest", str(root)])
+            result = json.loads(output.getvalue().splitlines()[-1])
+            raw_exists = (root / "latest-response.raw.txt").exists()
+        self.assertEqual(code, 0)
+        self.assertEqual(lifecycle, ["opened", "captured", "closed"])
+        self.assertTrue(raw_exists)
+        self.assertFalse(result["message_sent"])
+        self.assertFalse(result["request_match"])
+        self.assertEqual(result["event"], "courier_latest_response_captured")
+
+    def test_capture_latest_refuses_a_live_courier_owner(self):
+        owner = OwnerRecord("P", "P-1", 1234, "nonce", "waiting", "now")
+        class Session:
+            def __init__(self, *_args, **_kwargs): raise AssertionError("busy capture must not open Chrome")
+        with tempfile.TemporaryDirectory() as value, patch("chat_courier.cli.ChatSession", Session), patch("chat_courier.cli.read_owner", return_value=owner), patch("chat_courier.cli.process_alive", return_value=True), patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["courier_capture_latest", str(root)])
+            result = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error_code"], "COURIER_BROWSER_BUSY")
 
     def test_preflight_reports_auth_required_without_submit(self):
         class Session:

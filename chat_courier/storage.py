@@ -69,8 +69,9 @@ def load_response_cursor(request: Request) -> set[str] | None:
     return set(identities)
 
 def response_capture_path(request: Request) -> Path: return request.directory / "response-capture.json"
-def save_response_capture(request: Request, *, identity: str, index: int, text: str) -> dict[str, Any]:
-    raw_path = request.directory / "response.raw.txt"
+def _save_capture(request: Request, *, identity: str, index: int, text: str,
+                  raw_name: str, manifest_name: str) -> dict[str, Any]:
+    raw_path = request.directory / raw_name
     temporary = raw_path.with_suffix(".txt.tmp")
     temporary.write_text(text, encoding="utf-8", newline="\n")
     os.replace(temporary, raw_path)
@@ -80,8 +81,14 @@ def save_response_capture(request: Request, *, identity: str, index: int, text: 
         "assistant_index": index, "captured_at": time.time(),
         "raw_path": raw_path.name, "raw_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
-    atomic_json(response_capture_path(request), payload)
+    atomic_json(request.directory / manifest_name, payload)
     return payload
+def save_response_capture(request: Request, *, identity: str, index: int, text: str) -> dict[str, Any]:
+    return _save_capture(request, identity=identity, index=index, text=text,
+                         raw_name="response.raw.txt", manifest_name="response-capture.json")
+def save_latest_response_capture(request: Request, *, identity: str, index: int, text: str) -> dict[str, Any]:
+    return _save_capture(request, identity=identity, index=index, text=text,
+                         raw_name="latest-response.raw.txt", manifest_name="latest-response-capture.json")
 def load_response_capture(request: Request) -> tuple[dict[str, Any], str] | None:
     path = response_capture_path(request)
     if not path.exists(): return None

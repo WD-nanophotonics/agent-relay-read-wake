@@ -66,6 +66,7 @@ def test_capabilities_exposes_policy_not_url_or_profile(tmp_path, monkeypatch):
     assert value["projects"] == ["TEST"]
     assert value["arbitrary_url"] is False and value["arbitrary_profile"] is False
     assert "chat_url" not in value["project_policies"]["TEST"]
+    assert "courier_capture_latest" in value["operations"]
 
 
 def test_post_submission_browser_close_remains_same_request_recoverable(tmp_path, monkeypatch):

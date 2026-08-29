@@ -796,7 +796,8 @@ class ChatSession:
                 atomic_json(path, diagnostic)
         return diagnostic
 
-    def wait_for_reply(self, baseline: set[str] | None, deadline: float, *, after_latest_user: bool = False) -> AssistantTurn | None:
+    def wait_for_reply(self, baseline: set[str] | None, deadline: float, *,
+                       after_latest_user: bool = False, latest: bool = False) -> AssistantTurn | None:
         if self.page is None: raise BrowserError("browser session is not open")
         dom = ChatDom(self.page); previous: tuple[str, str] | None = None; stable = 0
         last_snapshot: dict[str, Any] = {}; sample_count = 0
@@ -804,7 +805,10 @@ class ChatSession:
             sample_count += 1
             self.owner.update("waiting_for_response")
             all_turns = dom.assistant_turns()
-            if baseline is not None:
+            if latest:
+                turns = all_turns
+                anchor_found = True
+            elif baseline is not None:
                 turns = [turn for turn in all_turns if turn.identity not in baseline]
                 anchor_found = True
             elif after_latest_user:

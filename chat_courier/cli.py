@@ -11,10 +11,11 @@ import time
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
-from .protocol import build_prompt, parse_reply
+from .protocol import REPLY_PROTOCOL, build_prompt, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (event, load_receipt, load_response_capture, load_response_cursor,
-                      receipt, request_was_submitted, save_response, save_response_capture)
+                      receipt, request_was_submitted, save_latest_response_capture,
+                      save_response, save_response_capture)
 from .workflow import (
     RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
     request_status, wait_status,
@@ -608,6 +609,59 @@ def recover_command(args: argparse.Namespace) -> int:
         return 2
     return run_command(args)
 
+
+def capture_latest_command(args: argparse.Namespace) -> int:
+    """Capture the latest completed assistant turn without sending anything."""
+    try:
+        request = load_request(args.request_directory)
+        owner = read_owner()
+        if owner is not None and process_alive(owner.owner_pid):
+            emit("courier_capture_latest_busy", ok=False, phase="capture_latest",
+                 error_code="COURIER_BROWSER_BUSY", retry_allowed=True,
+                 safe_next_action="courier_capture_latest", project_id=request.project_id,
+                 request_id=request.request_id)
+            return 1
+        with ChatSession(request, recovery=True) as session:
+            candidate = session.wait_for_reply(
+                None, time.monotonic() + min(60, request.workflow_window_seconds), latest=True,
+            )
+            if candidate is None:
+                emit("courier_capture_latest_empty", ok=False, phase="capture_latest",
+                     error_code="LATEST_ASSISTANT_REPLY_NOT_FOUND", retry_allowed=True,
+                     safe_next_action="courier_capture_latest", project_id=request.project_id,
+                     request_id=request.request_id)
+                return 1
+            capture = save_latest_response_capture(
+                request, identity=candidate.identity, index=candidate.index, text=candidate.text,
+            )
+    except (ValidationError, OwnerBusy, BrowserError) as exc:
+        emit("courier_capture_latest_failed", ok=False, phase="capture_latest",
+             error_code="LATEST_CAPTURE_FAILED", retry_allowed=True,
+             safe_next_action="courier_capture_latest", detail=str(exc))
+        return 1
+
+    # The browser context is closed before any content interpretation occurs.
+    envelope_present = REPLY_PROTOCOL in candidate.text
+    request_match: bool | None = None
+    protocol_detail: str | None = None
+    if envelope_present:
+        try:
+            parse_reply(candidate.text, request)
+        except ValidationError as exc:
+            request_match = False; protocol_detail = str(exc)
+        else:
+            request_match = True
+    values = {
+        "raw_path": str(request.directory / capture["raw_path"]),
+        "raw_sha256": capture["raw_sha256"], "assistant_identity": capture["assistant_identity"],
+        "envelope_present": envelope_present, "request_match": request_match,
+        "protocol_detail": protocol_detail, "message_sent": False,
+    }
+    event(request, "latest_response_captured", phase="capture_latest", **values)
+    emit("courier_latest_response_captured", ok=True, phase="capture_latest",
+         project_id=request.project_id, request_id=request.request_id, **values)
+    return 0
+
 def _profile_for_request(request) -> str:
     """Report the same deterministic profile selection used by ChatSession."""
     import os
@@ -671,6 +725,8 @@ def main(argv: list[str] | None = None) -> int:
     typed_wait.set_defaults(handler=wait_command)
     typed_recover = sub.add_parser("courier_recover", help="recover an already submitted request")
     typed_recover.add_argument("request_directory"); typed_recover.set_defaults(handler=recover_command)
+    capture_latest = sub.add_parser("courier_capture_latest", help="capture the latest completed assistant reply without sending")
+    capture_latest.add_argument("request_directory"); capture_latest.set_defaults(handler=capture_latest_command)
     args = parser.parse_args(argv)
     return args.handler(args)
 
