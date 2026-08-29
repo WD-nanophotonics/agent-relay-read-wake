@@ -355,11 +355,12 @@ class ChatDom:
                 result.append(AssistantTurn(identity, text, index))
         return result
 
-    def assistant_turns_after_user(self, marker: str) -> tuple[bool, list[AssistantTurn]]:
-        """Return assistant turns after the exact outbound user turn.
+    def assistant_turns_after_latest_user(self) -> tuple[bool, list[AssistantTurn]]:
+        """Return assistant turns after the latest outbound user turn.
 
-        This legacy recovery anchor inspects the submitted user turn, never the
-        assistant reply body.  New requests use the durable pre-send cursor.
+        Courier owns one dedicated conversation and dispatches one request at
+        a time, so conversation order is the legacy recovery cursor.  Neither
+        the user nor assistant prose participates in reply discovery.
         """
         result: list[AssistantTurn] = []; user_seen = False
         locator = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
@@ -375,7 +376,7 @@ class ChatDom:
                 continue
             is_user = role == "user" or "conversation-turn-user" in testid
             is_assistant = role == "assistant" or "conversation-turn-assistant" in testid
-            if is_user and marker in text:
+            if is_user:
                 user_seen = True; result = []
                 continue
             if user_seen and is_assistant and text:
@@ -795,26 +796,32 @@ class ChatSession:
                 atomic_json(path, diagnostic)
         return diagnostic
 
-    def wait_for_reply(self, baseline: set[str] | None, deadline: float, *, after_user_marker: str | None = None) -> AssistantTurn | None:
+    def wait_for_reply(self, baseline: set[str] | None, deadline: float, *, after_latest_user: bool = False) -> AssistantTurn | None:
         if self.page is None: raise BrowserError("browser session is not open")
         dom = ChatDom(self.page); previous: tuple[str, str] | None = None; stable = 0
-        last_snapshot: dict[str, Any] = {}
+        last_snapshot: dict[str, Any] = {}; sample_count = 0
         while time.monotonic() < deadline:
+            sample_count += 1
             self.owner.update("waiting_for_response")
             all_turns = dom.assistant_turns()
             if baseline is not None:
                 turns = [turn for turn in all_turns if turn.identity not in baseline]
                 anchor_found = True
-            elif after_user_marker is not None:
-                anchor_found, turns = dom.assistant_turns_after_user(after_user_marker)
+            elif after_latest_user:
+                anchor_found, turns = dom.assistant_turns_after_latest_user()
             else:
                 raise BrowserError("reply wait requires a durable cursor or an outbound user-turn anchor")
             is_streaming = dom.streaming()
             last_snapshot = {
                 "assistant_turn_count": len(all_turns), "candidate_count": len(turns),
                 "anchor_found": anchor_found, "streaming": is_streaming,
-                "composer_ready": dom.ready_for_next_turn(),
+                "composer_ready": dom.ready_for_next_turn(), "sample_count": sample_count,
             }
+            if sample_count == 1 or sample_count % 5 == 0:
+                atomic_json(self.request.directory / "response-diagnostic.json", {
+                    "version": 1, "project_id": self.request.project_id, "request_id": self.request.request_id,
+                    "state": "waiting", "captured_at": time.time(), **last_snapshot,
+                })
             if turns and not is_streaming:
                 latest = turns[-1]; sample = (latest.identity, latest.text)
                 stable = stable + 1 if sample == previous else 1; previous = sample
@@ -823,7 +830,7 @@ class ChatSession:
             self.page.wait_for_timeout(1000)
         atomic_json(self.request.directory / "response-diagnostic.json", {
             "version": 1, "project_id": self.request.project_id, "request_id": self.request.request_id,
-            "failure_stage": "reply_not_detected", "captured_at": time.time(), **last_snapshot,
+            "state": "timeout", "failure_stage": "reply_not_detected", "captured_at": time.time(), **last_snapshot,
         })
         return None
 

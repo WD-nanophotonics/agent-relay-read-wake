@@ -166,8 +166,7 @@ def confirm_register_command(args: argparse.Namespace) -> int:
 def _capture_response(session: ChatSession, request, baseline: set[str] | None, deadline: float,
                       *, legacy_recovery: bool = False) -> str:
     """Capture one completed assistant turn before the browser is closed."""
-    marker = f"REQUEST_ID={request.request_id}" if legacy_recovery else None
-    candidate = session.wait_for_reply(baseline, deadline, after_user_marker=marker)
+    candidate = session.wait_for_reply(baseline, deadline, after_latest_user=legacy_recovery)
     if candidate is None:
         return "response_timeout"
     capture = save_response_capture(

@@ -29,7 +29,7 @@ class BrowserContractTests(unittest.TestCase):
         self.assertNotIn("required_text", source)
         self.assertNotIn("request_id in turn.text", source)
 
-    def test_legacy_recovery_anchors_on_outbound_user_turn_not_reply_text(self):
+    def test_legacy_recovery_anchors_on_latest_user_turn_not_reply_text(self):
         class Node:
             def __init__(self, role, text, identity): self.role, self.text, self.identity = role, text, identity
             def inner_text(self): return self.text
@@ -47,7 +47,7 @@ class BrowserContractTests(unittest.TestCase):
                               Node("user", "REQUEST_ID=P-1", "u1"),
                               Node("assistant", "new reply without id", "a1")]
             def locator(self, _): return Locator(self.nodes)
-        found, turns = ChatDom(Page()).assistant_turns_after_user("REQUEST_ID=P-1")
+        found, turns = ChatDom(Page()).assistant_turns_after_latest_user()
         self.assertTrue(found)
         self.assertEqual([turn.text for turn in turns], ["new reply without id"])
 

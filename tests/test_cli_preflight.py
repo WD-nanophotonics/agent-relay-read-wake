@@ -47,8 +47,8 @@ class CliPreflightTests(unittest.TestCase):
 
     def test_completed_reply_is_captured_before_offline_protocol_parsing(self):
         class Session:
-            def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
-                self.call = (baseline, deadline, after_user_marker)
+            def wait_for_reply(self, baseline, deadline, *, after_latest_user=False):
+                self.call = (baseline, deadline, after_latest_user)
                 return AssistantTurn("assistant-1", "plain response without request id", 4)
 
         with tempfile.TemporaryDirectory() as value, patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
@@ -83,7 +83,7 @@ class CliPreflightTests(unittest.TestCase):
             def __enter__(self): lifecycle.append("opened"); return self
             def __exit__(self, *_): lifecycle.append("closed"); return False
             def submit(self, *_): return {"old-assistant"}
-            def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
+            def wait_for_reply(self, baseline, deadline, *, after_latest_user=False):
                 lifecycle.append("captured")
                 return AssistantTurn("new-assistant", "next machine work order", 7)
 
