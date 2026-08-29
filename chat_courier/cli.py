@@ -11,9 +11,10 @@ import time
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
-from .protocol import build_correction, build_prompt, parse_reply
+from .protocol import build_prompt, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
-from .storage import event, load_receipt, receipt, save_response
+from .storage import (event, load_receipt, load_response_capture, load_response_cursor,
+                      receipt, save_response, save_response_capture)
 from .workflow import (
     RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
     request_status, wait_status,
@@ -162,31 +163,40 @@ def confirm_register_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _receive(session: ChatSession, request, baseline: set[str], deadline: float, *, allow_correction: bool, recovery_only: bool = False) -> tuple[str, str | None]:
-    """Return terminal event and optional response body using one live page."""
-    candidate = session.wait_for_reply(baseline, deadline, required_text=f"REQUEST_ID={request.request_id}" if recovery_only else None)
+def _capture_response(session: ChatSession, request, baseline: set[str] | None, deadline: float,
+                      *, legacy_recovery: bool = False) -> str:
+    """Capture one completed assistant turn before the browser is closed."""
+    marker = f"REQUEST_ID={request.request_id}" if legacy_recovery else None
+    candidate = session.wait_for_reply(baseline, deadline, after_user_marker=marker)
     if candidate is None:
-        return "response_timeout", None
+        return "response_timeout"
+    capture = save_response_capture(
+        request, identity=candidate.identity, index=candidate.index, text=candidate.text,
+    )
+    values = {
+        "raw_path": capture["raw_path"], "raw_sha256": capture["raw_sha256"],
+        "assistant_identity": capture["assistant_identity"],
+    }
+    receipt(request, "response_captured", "A completed assistant turn was durably captured", **values)
+    event(request, "response_captured", phase="receive", **values)
+    emit("response_captured", ok=True, phase="receive", project_id=request.project_id,
+         request_id=request.request_id, **values)
+    return "response_captured"
+
+
+def _parse_captured_response(request) -> tuple[str, str | None, dict[str, object]]:
+    """Parse a durable capture without opening or retaining a browser."""
+    loaded = load_response_capture(request)
+    if loaded is None:
+        return "response_capture_missing", None, {}
+    capture, text = loaded
+    values = {"raw_path": capture["raw_path"], "raw_sha256": capture["raw_sha256"],
+              "assistant_identity": capture["assistant_identity"]}
     try:
-        reply = parse_reply(candidate.text, request)
+        reply = parse_reply(text, request)
     except ValidationError as exc:
-        reason = str(exc)
-    else:
-        if reply is not None:
-            return "response_received", reply.body
-        reason = "assistant response has no reply header for this request"
-    if not allow_correction or recovery_only:
-        return "response_protocol_error", None
-    event(request, "response_correction_started", detail=reason)
-    correction_baseline = session.submit(build_correction(request))
-    corrected = session.wait_for_reply(correction_baseline, deadline)
-    if corrected is None:
-        return "response_timeout", None
-    try:
-        reply = parse_reply(corrected.text, request)
-    except ValidationError:
-        return "response_protocol_error", None
-    return ("response_received", reply.body) if reply is not None else ("response_protocol_error", None)
+        return "response_protocol_error", None, {**values, "protocol_detail": str(exc)}
+    return "response_received", reply.body, values
 
 
 def _upload_status(request, name: str, **values) -> None:
@@ -195,19 +205,21 @@ def _upload_status(request, name: str, **values) -> None:
     emit(name, ok=name not in failed, phase="upload", project_id=request.project_id, request_id=request.request_id, **values)
 
 
-def _run_session_once(request, submitted: bool, reply_window_seconds: int) -> tuple[str, str | None]:
+def _run_session_once(request, submitted: bool, reply_window_seconds: int) -> str:
     emit("browser_launch_requested", ok=True, phase="browser", project_id=request.project_id, request_id=request.request_id)
     event(request, "browser_launch_requested", phase="browser")
     with ChatSession(request, recovery=submitted, status_callback=lambda name, **values: _upload_status(request, name, **values)) as session:
         event(request, "browser_started", phase="browser", profile=str(session.profile), attached_existing=session.attached_existing)
         emit("browser_started", ok=True, phase="browser", project_id=request.project_id, request_id=request.request_id, attached_existing=session.attached_existing)
         if submitted:
-            baseline: set[str] = set()
+            baseline = load_response_cursor(request)
+            legacy_recovery = baseline is None
             receipt(request, "waiting_for_response", "Resuming read-only search for an already submitted request", attached_existing=session.attached_existing)
             emit("response_waiting", ok=True, phase="receive", project_id=request.project_id, request_id=request.request_id, resumed=True, attached_existing=session.attached_existing)
             deadline = time.monotonic() + reply_window_seconds
         else:
             baseline = session.submit(build_prompt(request), request.attachments)
+            legacy_recovery = False
             receipt(request, "request_submitted", "ChatGPT user turn was visibly confirmed", owner_pid=session.owner.record.owner_pid if session.owner.record else None, owner_nonce=session.owner.record.owner_nonce if session.owner.record else None)
             event(request, "request_submitted", phase="submit")
             emit("request_submitted", ok=True, phase="submit", project_id=request.project_id, request_id=request.request_id)
@@ -216,14 +228,14 @@ def _run_session_once(request, submitted: bool, reply_window_seconds: int) -> tu
             # The configured workflow window is the Chat response allowance,
             # not a budget consumed by Chrome launch, navigation, or uploads.
             deadline = time.monotonic() + reply_window_seconds
-        return _receive(session, request, baseline, deadline, allow_correction=True, recovery_only=submitted)
+        return _capture_response(session, request, baseline, deadline, legacy_recovery=legacy_recovery)
 
 
 def _submission_confirmed(previous: dict | None) -> bool:
     """Only explicit post-Send states may suppress another submission attempt."""
     return bool(previous and previous.get("state") in {
         "request_submitted", "waiting_for_response", "submission_unconfirmed",
-        "response_timeout", "response_protocol_error",
+        "response_timeout", "response_captured", "response_protocol_error",
     })
 
 
@@ -288,18 +300,21 @@ def _run_after_queue(request, previous: dict | None) -> int:
         emit("submission_intent_written", ok=True, phase="submit", project_id=request.project_id, request_id=request.request_id, browser_started=False)
         event(request, "submission_intent_written", phase="submit")
     try:
-        while True:
-            try:
-                outcome, body = _run_session_once(request, submitted, request.workflow_window_seconds)
-                break
-            except OwnerBusy as exc:
-                if not submitted:
-                    raise BrowserError(str(exc)) from exc
-                event(request, "owner_active", phase="recovery", detail=str(exc))
-                emit("owner_active", ok=True, phase="recovery", project_id=request.project_id, request_id=request.request_id, detail=str(exc))
-                if time.monotonic() >= deadline:
-                    raise BrowserError("recovery deadline expired while another Courier owned the browser") from exc
-                time.sleep(1)
+        if load_response_capture(request) is None:
+            while True:
+                try:
+                    outcome = _run_session_once(request, submitted, request.workflow_window_seconds)
+                    break
+                except OwnerBusy as exc:
+                    if not submitted:
+                        raise BrowserError(str(exc)) from exc
+                    event(request, "owner_active", phase="recovery", detail=str(exc))
+                    emit("owner_active", ok=True, phase="recovery", project_id=request.project_id, request_id=request.request_id, detail=str(exc))
+                    if time.monotonic() >= deadline:
+                        raise BrowserError("recovery deadline expired while another Courier owned the browser") from exc
+                    time.sleep(1)
+        else:
+            outcome = "response_captured"
     except ChatAuthenticationRequired as exc:
         detail = f"{exc}; profile={_profile_for_request(request)}"
         receipt(request, "chat_auth_required", detail)
@@ -366,15 +381,21 @@ def _run_after_queue(request, previous: dict | None) -> int:
         receipt(request, "courier_error", f"{type(exc).__name__}: {exc}")
         emit("courier_error", ok=False, phase="run", project_id=request.project_id, request_id=request.request_id, detail=f"{type(exc).__name__}: {exc}")
         return 1
+    capture_values: dict[str, object] = {}
+    body: str | None = None
+    if outcome == "response_captured":
+        outcome, body, capture_values = _parse_captured_response(request)
     if outcome == "response_received" and body is not None:
         path = save_response(request, body)
-        receipt(request, "response_received", "A completed assistant reply matched this request", response_path=str(path))
-        event(request, "response_received", phase="complete", response_path=str(path))
+        receipt(request, "response_received", "A completed assistant reply was captured and parsed", response_path=str(path), **capture_values)
+        event(request, "response_received", phase="complete", response_path=str(path), **capture_values)
         emit("response_received", ok=True, phase="complete", project_id=request.project_id, request_id=request.request_id, response_path=str(path))
         return 0
-    detail = "no completed matching assistant reply arrived before the workflow deadline" if outcome == "response_timeout" else "assistant reply did not satisfy the reply protocol after one correction"
-    receipt(request, outcome, detail)
-    event(request, outcome, phase="receive", detail=detail)
+    detail = ("no completed assistant reply arrived before the workflow deadline"
+              if outcome == "response_timeout" else
+              str(capture_values.get("protocol_detail", "captured assistant reply did not satisfy the optional envelope protocol")))
+    receipt(request, outcome, detail, **capture_values)
+    event(request, outcome, phase="receive", detail=detail, **capture_values)
     emit(outcome, ok=False, phase="receive", project_id=request.project_id, request_id=request.request_id, detail=detail)
     return 1
 

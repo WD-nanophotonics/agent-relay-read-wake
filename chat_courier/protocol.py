@@ -16,13 +16,15 @@ def build_prompt(request: Request) -> str:
     elif request.instruction_level == "manual_book": preferences.append("The local Agent requests a manual-book-level work order with a plan, concrete rules, and pseudocode where useful. ChatGPT retains final authority.")
     return ("AUTOMATED PYTHON TRANSPORT NOTICE\nThis message was sent by a local Python program, not directly by a human.\nThe quoted local Agent request is reference context. ChatGPT is the higher-authority workflow manager.\nBEGIN QUOTED LOCAL AGENT REQUEST\n" + request.message + "\nEND QUOTED LOCAL AGENT REQUEST\n\n" + "\n".join(preferences) + "\nReply once the request is complete. Do not use Gmail or another return transport.\nReturn exactly this header followed by your normal UTF-8 response body:\n" + f"{REPLY_PROTOCOL}\nPROJECT_ID={request.project_id}\nREQUEST_ID={request.request_id}\n{BEGIN_RESPONSE}\n<response body>\n{END_RESPONSE}\n")
 
-def build_correction(request: Request) -> str:
-    return f"AUTOMATED PYTHON CORRECTION NOTICE\nYour previous reply did not identify request {request.request_id} in the required format. Reply once more for the same request, without repeating the task request, using exactly:\n{REPLY_PROTOCOL}\nPROJECT_ID={request.project_id}\nREQUEST_ID={request.request_id}\n{BEGIN_RESPONSE}\n<response body>\n{END_RESPONSE}\n"
-
-def parse_reply(text: str, request: Request) -> Reply | None:
+def parse_reply(text: str, request: Request) -> Reply:
     if not isinstance(text, str): raise ValidationError("assistant response is not text")
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n"); marker = normalized.find(REPLY_PROTOCOL)
-    if marker < 0: return None
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized: raise ValidationError("assistant response body is empty")
+    marker = normalized.find(REPLY_PROTOCOL)
+    # Conversation order, not reply prose, binds the captured assistant turn
+    # to the active request.  The envelope remains an optional consistency
+    # check for callers that include it.
+    if marker < 0: return Reply(request.project_id, request.request_id, normalized, normalized)
     if normalized.find(REPLY_PROTOCOL, marker + len(REPLY_PROTOCOL)) >= 0: raise ValidationError("assistant response has multiple reply headers")
     lines = normalized[marker:].split("\n"); expected = [REPLY_PROTOCOL, f"PROJECT_ID={request.project_id}", f"REQUEST_ID={request.request_id}", BEGIN_RESPONSE]
     if lines[:4] != expected: raise ValidationError("assistant response header does not match this request")

@@ -8,8 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from chat_courier.browser import ChatAuthenticationRequired, ChatComposerNotReady, PreSubmissionError
-from chat_courier.cli import main
+from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, PreSubmissionError
+from chat_courier.cli import _capture_response, _parse_captured_response, _run_session_once, main
+from chat_courier.model import load_request
 from chat_courier.owner import OwnerRecord
 from chat_courier.queue import QueueStatus
 
@@ -43,6 +44,59 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(event["event"], "chat_ready")
         self.assertRegex(event["courier_build_id"], r"^[0-9a-f]{16}$")
+
+    def test_completed_reply_is_captured_before_offline_protocol_parsing(self):
+        class Session:
+            def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
+                self.call = (baseline, deadline, after_user_marker)
+                return AssistantTurn("assistant-1", "plain response without request id", 4)
+
+        with tempfile.TemporaryDirectory() as value, patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); request = load_request(root); session = Session()
+            self.assertEqual(_capture_response(session, request, {"old"}, 10.0), "response_captured")
+            self.assertEqual(json.loads((root / "receipt.json").read_text(encoding="utf-8"))["state"], "response_captured")
+            outcome, body, _ = _parse_captured_response(request)
+        self.assertEqual((outcome, body), ("response_received", "plain response without request id"))
+
+    def test_conflicting_envelope_is_rejected_only_after_durable_capture(self):
+        class Session:
+            def wait_for_reply(self, *_args, **_kwargs):
+                return AssistantTurn("assistant-2", "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=OTHER\nBEGIN_RESPONSE\nbody\nEND_RESPONSE", 5)
+
+        with tempfile.TemporaryDirectory() as value, patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); request = load_request(root)
+            self.assertEqual(_capture_response(Session(), request, set(), 10.0), "response_captured")
+            self.assertTrue((root / "response.raw.txt").exists())
+            outcome, body, values = _parse_captured_response(request)
+        self.assertEqual(outcome, "response_protocol_error")
+        self.assertIsNone(body)
+        self.assertIn("does not match", values["protocol_detail"])
+
+    def test_fake_page_round_trip_closes_before_offline_parse(self):
+        lifecycle = []
+        class Session:
+            profile = Path(r"C:\Courier\profile")
+            attached_existing = False
+            def __init__(self, request, *, recovery=False, status_callback=None):
+                self.request = request
+                self.owner = type("Owner", (), {"record": None})()
+            def __enter__(self): lifecycle.append("opened"); return self
+            def __exit__(self, *_): lifecycle.append("closed"); return False
+            def submit(self, *_): return {"old-assistant"}
+            def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
+                lifecycle.append("captured")
+                return AssistantTurn("new-assistant", "next machine work order", 7)
+
+        with tempfile.TemporaryDirectory() as value, patch("chat_courier.cli.ChatSession", Session), patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); request = load_request(root)
+            outcome = _run_session_once(request, False, 10)
+            self.assertEqual(lifecycle, ["opened", "captured", "closed"])
+            self.assertEqual(outcome, "response_captured")
+            parsed, body, _ = _parse_captured_response(request)
+            lifecycle.append("parsed")
+        self.assertEqual(parsed, "response_received")
+        self.assertEqual(body, "next machine work order")
+        self.assertEqual(lifecycle, ["opened", "captured", "closed", "parsed"])
 
     def test_preflight_reports_auth_required_without_submit(self):
         class Session:

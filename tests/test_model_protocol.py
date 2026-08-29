@@ -32,9 +32,10 @@ class ModelProtocolTests(unittest.TestCase):
             text = f"{REPLY_PROTOCOL}\nPROJECT_ID=OTHER\nREQUEST_ID=TEST-001\n{BEGIN_RESPONSE}\nbody\n{END_RESPONSE}"
             with self.assertRaises(ValidationError): parse_reply(text, request)
 
-    def test_prose_is_not_a_reply(self):
+    def test_unwrapped_prose_is_bound_by_the_local_capture(self):
         with tempfile.TemporaryDirectory() as value:
-            self.assertIsNone(parse_reply("ordinary assistant prose", self.make_request(Path(value))))
+            self.assertEqual(parse_reply("ordinary assistant prose", self.make_request(Path(value))).body,
+                             "ordinary assistant prose")
 
     def test_missing_terminator_fails_closed(self):
         with tempfile.TemporaryDirectory() as value:

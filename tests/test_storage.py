@@ -7,7 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from chat_courier.model import ValidationError, load_request
-from chat_courier.storage import load_receipt, receipt, save_response
+from chat_courier.storage import (load_receipt, load_response_capture, load_response_cursor,
+                                  receipt, save_response, save_response_capture,
+                                  save_response_cursor)
 from chat_courier.cli import _safe_pre_browser_turn_recovery, _submission_confirmed
 
 
@@ -30,6 +32,18 @@ class StorageTests(unittest.TestCase):
             (root / "message.txt").write_text("changed", encoding="utf-8")
             with self.assertRaises(ValidationError): load_receipt(load_request(root))
 
+    def test_response_cursor_and_raw_capture_are_hash_bound(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            save_response_cursor(request, {"old-a", "old-b"})
+            self.assertEqual(load_response_cursor(request), {"old-a", "old-b"})
+            saved = save_response_capture(request, identity="new-c", index=3, text="reply without an envelope")
+            capture, text = load_response_capture(request)
+            self.assertEqual(capture["raw_sha256"], saved["raw_sha256"])
+            self.assertEqual(text, "reply without an envelope")
+            (Path(value) / "response.raw.txt").write_text("drift", encoding="utf-8")
+            with self.assertRaises(ValidationError): load_response_capture(request)
+
     def test_only_explicit_post_send_states_enter_read_only_recovery(self):
         self.assertFalse(_submission_confirmed({"state": "submission_intent"}))
         self.assertFalse(_submission_confirmed({"state": "browser_error"}))
@@ -37,6 +51,7 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(_submission_confirmed({"state": "submission_not_started"}))
         self.assertTrue(_submission_confirmed({"state": "request_submitted"}))
         self.assertTrue(_submission_confirmed({"state": "submission_unconfirmed"}))
+        self.assertTrue(_submission_confirmed({"state": "response_captured"}))
 
     def test_queue_provenance_survives_final_receipt_transition(self):
         with tempfile.TemporaryDirectory() as value:

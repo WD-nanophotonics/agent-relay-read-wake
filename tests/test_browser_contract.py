@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import inspect
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,79 @@ class BrowserContractTests(unittest.TestCase):
 
     def test_confirmation_fallback_is_exposed(self):
         self.assertTrue(callable(ChatDom.submission_visible))
+
+    def test_reply_wait_never_filters_assistant_text(self):
+        source = inspect.getsource(ChatSession.wait_for_reply)
+        self.assertNotIn("required_text", source)
+        self.assertNotIn("request_id in turn.text", source)
+
+    def test_legacy_recovery_anchors_on_outbound_user_turn_not_reply_text(self):
+        class Node:
+            def __init__(self, role, text, identity): self.role, self.text, self.identity = role, text, identity
+            def inner_text(self): return self.text
+            def get_attribute(self, name):
+                if name == "data-message-author-role": return self.role
+                if name == "data-message-id": return self.identity
+                return None
+        class Locator:
+            def __init__(self, nodes): self.nodes = nodes
+            def count(self): return len(self.nodes)
+            def nth(self, index): return self.nodes[index]
+        class Page:
+            def __init__(self):
+                self.nodes = [Node("assistant", "old reply", "a0"),
+                              Node("user", "REQUEST_ID=P-1", "u1"),
+                              Node("assistant", "new reply without id", "a1")]
+            def locator(self, _): return Locator(self.nodes)
+        found, turns = ChatDom(Page()).assistant_turns_after_user("REQUEST_ID=P-1")
+        self.assertTrue(found)
+        self.assertEqual([turn.text for turn in turns], ["new reply without id"])
+
+    def test_completed_turn_is_returned_after_three_stable_samples(self):
+        class Clock:
+            value = 0.0
+            def __call__(self): return self.value
+        class Page:
+            def __init__(self, clock): self.clock = clock
+            def wait_for_timeout(self, milliseconds): self.clock.value += milliseconds / 1000
+        class Owner:
+            def update(self, _): pass
+        class Dom:
+            def assistant_turns(self): return [type("Turn", (), {"identity": "a1", "text": "reply", "index": 1})()]
+            def streaming(self): return False
+            def ready_for_next_turn(self): return True
+        with tempfile.TemporaryDirectory() as value:
+            clock = Clock(); session = object.__new__(ChatSession)
+            session.page = Page(clock); session.owner = Owner()
+            session.request = type("Request", (), {"directory": Path(value), "project_id": "P", "request_id": "P-1"})()
+            with patch("chat_courier.browser.ChatDom", return_value=Dom()), patch("chat_courier.browser.time.monotonic", side_effect=clock):
+                turn = session.wait_for_reply(set(), 10)
+        self.assertEqual(turn.text, "reply")
+        self.assertEqual(clock.value, 2.0)
+
+    def test_reply_timeout_records_dom_detection_evidence(self):
+        class Clock:
+            value = 0.0
+            def __call__(self): return self.value
+        class Page:
+            def __init__(self, clock): self.clock = clock
+            def wait_for_timeout(self, milliseconds): self.clock.value += milliseconds / 1000
+        class Owner:
+            def update(self, _): pass
+        class Dom:
+            def assistant_turns(self): return []
+            def streaming(self): return False
+            def ready_for_next_turn(self): return True
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value); clock = Clock(); session = object.__new__(ChatSession)
+            session.page = Page(clock); session.owner = Owner()
+            session.request = type("Request", (), {"directory": root, "project_id": "P", "request_id": "P-1"})()
+            with patch("chat_courier.browser.ChatDom", return_value=Dom()), patch("chat_courier.browser.time.monotonic", side_effect=clock):
+                self.assertIsNone(session.wait_for_reply(set(), 2))
+            diagnostic = json.loads((root / "response-diagnostic.json").read_text(encoding="utf-8"))
+        self.assertEqual(diagnostic["failure_stage"], "reply_not_detected")
+        self.assertEqual(diagnostic["candidate_count"], 0)
+        self.assertTrue(diagnostic["composer_ready"])
 
     def test_normal_chrome_user_data_is_rejected(self):
         with self.assertRaises(ProfileConfigurationError):

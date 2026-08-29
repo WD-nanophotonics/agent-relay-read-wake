@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from .model import Request, atomic_json, conversation_id_from_url, runtime_root
 from .owner import OwnerBusy, OwnerLease, OwnerRecord, process_alive, read_owner, terminate_orphan_browser
+from .storage import save_response_cursor
 
 
 class BrowserError(RuntimeError):
@@ -354,6 +355,35 @@ class ChatDom:
                 result.append(AssistantTurn(identity, text, index))
         return result
 
+    def assistant_turns_after_user(self, marker: str) -> tuple[bool, list[AssistantTurn]]:
+        """Return assistant turns after the exact outbound user turn.
+
+        This legacy recovery anchor inspects the submitted user turn, never the
+        assistant reply body.  New requests use the durable pre-send cursor.
+        """
+        result: list[AssistantTurn] = []; user_seen = False
+        locator = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
+        try: count = locator.count()
+        except Exception as exc: raise BrowserError(f"conversation DOM is unavailable: {exc}") from exc
+        for index in range(count):
+            node = locator.nth(index)
+            try:
+                text = node.inner_text().strip()
+                role = (node.get_attribute("data-message-author-role") or "").lower()
+                testid = (node.get_attribute("data-testid") or "").lower()
+            except Exception:
+                continue
+            is_user = role == "user" or "conversation-turn-user" in testid
+            is_assistant = role == "assistant" or "conversation-turn-assistant" in testid
+            if is_user and marker in text:
+                user_seen = True; result = []
+                continue
+            if user_seen and is_assistant and text:
+                try: identity = node.get_attribute("data-message-id") or f"{index}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+                except Exception: continue
+                result.append(AssistantTurn(identity, text, index))
+        return user_seen, result
+
     def streaming(self) -> bool:
         try:
             if self.page.locator(self.stop_selector).count() and self.page.locator(self.stop_selector).first.is_visible(): return True
@@ -601,6 +631,9 @@ class ChatSession:
             composer = dom.wait_for_composer(timeout_seconds=60.0)
             readiness_timeline.append({"phase": "before_upload", **dom.composer_health()})
             baseline = {turn.identity for turn in dom.assistant_turns(include_empty=include_empty_baseline)}
+            # Persist the receive cursor before Send.  Recovery can now locate
+            # the next assistant turn without inspecting its reply contents.
+            save_response_cursor(self.request, baseline)
             dom.upload(files, on_event=self._status)
             composer = dom.wait_for_composer(timeout_seconds=60.0)
             readiness_timeline.append({"phase": "before_fill", **dom.composer_health()})
@@ -762,18 +795,36 @@ class ChatSession:
                 atomic_json(path, diagnostic)
         return diagnostic
 
-    def wait_for_reply(self, baseline: set[str], deadline: float, *, required_text: str | None = None) -> AssistantTurn | None:
+    def wait_for_reply(self, baseline: set[str] | None, deadline: float, *, after_user_marker: str | None = None) -> AssistantTurn | None:
         if self.page is None: raise BrowserError("browser session is not open")
         dom = ChatDom(self.page); previous: tuple[str, str] | None = None; stable = 0
+        last_snapshot: dict[str, Any] = {}
         while time.monotonic() < deadline:
             self.owner.update("waiting_for_response")
-            turns = [turn for turn in dom.assistant_turns() if turn.identity not in baseline and (required_text is None or required_text in turn.text)]
-            if turns and not dom.streaming():
+            all_turns = dom.assistant_turns()
+            if baseline is not None:
+                turns = [turn for turn in all_turns if turn.identity not in baseline]
+                anchor_found = True
+            elif after_user_marker is not None:
+                anchor_found, turns = dom.assistant_turns_after_user(after_user_marker)
+            else:
+                raise BrowserError("reply wait requires a durable cursor or an outbound user-turn anchor")
+            is_streaming = dom.streaming()
+            last_snapshot = {
+                "assistant_turn_count": len(all_turns), "candidate_count": len(turns),
+                "anchor_found": anchor_found, "streaming": is_streaming,
+                "composer_ready": dom.ready_for_next_turn(),
+            }
+            if turns and not is_streaming:
                 latest = turns[-1]; sample = (latest.identity, latest.text)
                 stable = stable + 1 if sample == previous else 1; previous = sample
                 if stable >= 3: return latest
             else: previous = None; stable = 0
             self.page.wait_for_timeout(1000)
+        atomic_json(self.request.directory / "response-diagnostic.json", {
+            "version": 1, "project_id": self.request.project_id, "request_id": self.request.request_id,
+            "failure_stage": "reply_not_detected", "captured_at": time.time(), **last_snapshot,
+        })
         return None
 
     def close(self) -> None:
