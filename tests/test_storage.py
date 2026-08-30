@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from chat_courier.model import ValidationError, load_request
+from chat_courier.model import MAX_INLINE_MESSAGE_BYTES, ValidationError, load_request
 from chat_courier.storage import (event, load_receipt, load_response_capture, load_response_cursor,
                                   receipt, save_latest_probe, save_response, save_response_capture,
                                   save_response_cursor, submission_count)
@@ -15,6 +15,18 @@ from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confi
 
 
 class StorageTests(unittest.TestCase):
+    def test_oversized_inline_message_is_rejected_before_browser_use(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            (root / "message.txt").write_text(
+                "x" * (MAX_INLINE_MESSAGE_BYTES + 1), encoding="utf-8")
+            (root / "request.json").write_text(json.dumps({
+                "version": 1, "project_id": "P", "request_id": "P-1",
+                "chat_url": "https://chatgpt.com/c/x"}), encoding="utf-8")
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+                with self.assertRaisesRegex(ValidationError, "inline limit"):
+                    load_request(root)
+
     def request(self, root: Path, retry: bool = False):
         (root / "message.txt").write_text("message", encoding="utf-8")
         manifest = {"version": 1, "project_id": "P", "request_id": "P-1",

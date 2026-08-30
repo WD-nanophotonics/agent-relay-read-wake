@@ -185,6 +185,11 @@ operation refuses to resend it.
 received request is idempotent. Reusing its directory with changed input is
 rejected.
 
+Inline request text is limited to 32 KiB. Larger reports must be committed and
+published through the owning project's normal Git workflow; Courier receives a
+compact reference bound to the published commit instead of filling the browser
+composer with the report body.
+
 Chat payloads are UTF-8 and may contain ordinary project facts, paths,
 numbers, and commit identifiers. Do not place credentials, tokens, passwords,
 or private keys in a request. Host safety review remains outside this tool.

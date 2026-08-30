@@ -9,6 +9,9 @@ import re
 import secrets
 import time
 from typing import Any
+
+
+MAX_INLINE_MESSAGE_BYTES = 32 * 1024
 from urllib.parse import urlsplit
 
 from .locking import RuntimeLock
@@ -153,6 +156,11 @@ def load_request(directory: str | Path) -> Request:
     if message_path.parent != root: raise ValidationError("message_file must be directly inside the request directory")
     message = _read_utf8(message_path, "message_file")
     if not message.strip(): raise ValidationError("message_file must not be empty")
+    if len(message.encode("utf-8")) > MAX_INLINE_MESSAGE_BYTES:
+        raise ValidationError(
+            f"message_file exceeds the {MAX_INLINE_MESSAGE_BYTES}-byte inline limit; "
+            "publish the evidence and send a compact immutable reference"
+        )
     retry_message = None
     retry_name = raw.get("retry_message_file")
     retry_path = None
