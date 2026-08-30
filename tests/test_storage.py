@@ -8,10 +8,10 @@ from unittest.mock import patch
 
 from chat_courier.model import ValidationError, load_request
 from chat_courier.storage import (load_receipt, load_response_capture, load_response_cursor,
-                                  receipt, save_response, save_response_capture,
+                                  receipt, save_latest_probe, save_response, save_response_capture,
                                   save_response_cursor, submission_count)
 from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confirmed,
-                              resend_once_command, rollover_target_command)
+                              resend_once_command, retry_once_command, rollover_target_command)
 
 
 class StorageTests(unittest.TestCase):
@@ -93,6 +93,68 @@ class StorageTests(unittest.TestCase):
                 self.assertTrue(args.use_retry_message)
                 self.assertEqual(load_request(request.directory).retry_message, "compact message")
                 run.assert_called_once_with(args)
+
+    def test_evidence_retry_allows_one_unsent_browser_started_request(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            receipt(request, "queue_recovery_required", "lost after browser start")
+            (request.directory / "events.jsonl").write_text(
+                json.dumps({"event": "browser_started", "project_id": "P",
+                            "request_id": "P-1"}) + "\n", encoding="utf-8")
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(retry_once_command(args), 0)
+                self.assertTrue(args.evidence_retry)
+                run.assert_called_once_with(args)
+                self.assertEqual(retry_once_command(args), 2)
+
+    def test_evidence_retry_rejects_chat_anchor_submission_and_live_owner(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            receipt(request, "queue_recovery_required", "lost")
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            save_latest_probe(request, user_turn_found=True, reply_found=False,
+                              live_owner_found=False)
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None), \
+                    patch("chat_courier.cli.run_command") as run:
+                self.assertEqual(retry_once_command(args), 2)
+                run.assert_not_called()
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            (request.directory / "events.jsonl").write_text(
+                json.dumps({"event": "request_submitted", "project_id": "P",
+                            "request_id": "P-1"}) + "\n", encoding="utf-8")
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None):
+                self.assertEqual(retry_once_command(args), 2)
+
+    def test_evidence_retry_rejects_stale_or_mismatched_probe(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            receipt(request, "queue_recovery_required", "lost")
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            probe_path = request.directory / "latest-probe.json"
+            probe = json.loads(probe_path.read_text(encoding="utf-8"))
+            probe["captured_at"] = 1
+            probe_path.write_text(json.dumps(probe), encoding="utf-8")
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None):
+                self.assertEqual(retry_once_command(args), 2)
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            probe = json.loads(probe_path.read_text(encoding="utf-8"))
+            probe["fingerprint"] = "0" * 64
+            probe_path.write_text(json.dumps(probe), encoding="utf-8")
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None):
+                self.assertEqual(retry_once_command(args), 2)
 
     def test_resend_archives_a_previously_accepted_ui_error(self):
         with tempfile.TemporaryDirectory() as value:

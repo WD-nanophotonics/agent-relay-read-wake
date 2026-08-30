@@ -15,9 +15,10 @@ from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, Validation
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
-                      load_response_cursor, receipt, request_was_submitted,
+                      evidence_retry_count, load_latest_probe, load_response_cursor, receipt,
+                      request_events, request_was_submitted,
                       save_latest_response_capture, save_response, save_response_capture,
-                      submission_count)
+                      save_latest_probe, submission_count)
 from .workflow import (
     RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
     request_status, wait_status,
@@ -414,11 +415,12 @@ def _run_after_queue(request, previous: dict | None, *, resend_once: bool = Fals
     return 1
 
 
-def _wait_for_queue(request, previous: dict | None) -> tuple[CourierQueue | None, int | None]:
+def _wait_for_queue(request, previous: dict | None, *, evidence_retry: bool = False) -> tuple[CourierQueue | None, int | None]:
     """Join one durable FIFO ticket and wait without touching Chrome."""
     queue = CourierQueue(request)
     try:
-        status = queue.join(allow_active_recovery=_submission_confirmed(previous) or _safe_pre_browser_turn_recovery(previous, request))
+        status = queue.join(allow_active_recovery=(evidence_retry or _submission_confirmed(previous)
+                                                   or _safe_pre_browser_turn_recovery(previous, request)))
     except (QueueIntegrityError, RuntimeError, OSError) as exc:
         receipt(request, "configuration_error", str(exc))
         emit("configuration_error", ok=False, phase="queue", project_id=request.project_id, request_id=request.request_id, detail=str(exc))
@@ -492,7 +494,9 @@ def run_command(args: argparse.Namespace) -> int:
         emit("response_duplicate", ok=True, phase="complete", project_id=request.project_id, request_id=request.request_id, response_path=str(request.directory / "response.txt"))
         return 0
     try:
-        queue, terminal = _wait_for_queue(request, previous)
+        queue, terminal = _wait_for_queue(
+            request, previous, evidence_retry=bool(getattr(args, "evidence_retry", False))
+        )
     except KeyboardInterrupt:
         # The request has not crossed the browser boundary. Re-open its own
         # queue identity only to remove the abandoned queued ticket.
@@ -648,6 +652,47 @@ def resend_once_command(args: argparse.Namespace) -> int:
     return run_command(args)
 
 
+def retry_once_command(args: argparse.Namespace) -> int:
+    """Retry one apparently unsent immutable request after a fresh read-only probe."""
+    try:
+        request = load_request(args.request_directory)
+        previous = load_receipt(request)
+        probe = load_latest_probe(request)
+        events = request_events(request)
+        owner = read_owner()
+        owner_live = bool(owner and (process_alive(owner.owner_pid)
+                                    or (owner.browser_pid and process_alive(owner.browser_pid))))
+        forbidden = {"request_submitted", "chat_submission_unconfirmed", "submission_unconfirmed"}
+        if previous is None or previous.get("state") != "queue_recovery_required":
+            raise ValidationError("evidence retry requires queue_recovery_required")
+        if time.time() - float(probe.get("captured_at", 0)) > 300:
+            raise ValidationError("latest-response probe is stale")
+        if probe.get("fingerprint") != request.fingerprint:
+            raise ValidationError("request fingerprint changed after the read-only probe")
+        if probe.get("latest_user_turn_found") or probe.get("post_submission_reply_found"):
+            raise ValidationError("Chat already contains this request or its reply")
+        if probe.get("live_owner_found") or owner_live:
+            raise ValidationError("a live Courier or browser owner still exists")
+        if submission_count(request) or any(value.get("event") in forbidden for value in events):
+            raise ValidationError("submission evidence forbids an evidence retry")
+        if (request.directory / "response.txt").exists():
+            raise ValidationError("a saved response forbids an evidence retry")
+        if evidence_retry_count(request):
+            raise ValidationError("the evidence retry budget is exhausted")
+    except (OSError, TypeError, ValueError, ValidationError, OwnerBusy) as exc:
+        emit("courier_retry_refused", ok=False, phase="retry", detail=str(exc),
+             error_code="COURIER_EVIDENCE_RETRY_REFUSED", retry_allowed=False)
+        return 2
+    event(request, "evidence_retry_authorized", phase="retry",
+          probe_captured_at=probe["captured_at"], probe_fingerprint=probe["fingerprint"])
+    emit("courier_evidence_retry_authorized", ok=True, phase="retry",
+         project_id=request.project_id, request_id=request.request_id,
+         probe_captured_at=probe["captured_at"], submission_count=0)
+    args.evidence_retry = True
+    args.resend_once = False
+    return run_command(args)
+
+
 def rollover_target_command(args: argparse.Namespace) -> int:
     """Move one exhausted conversation aside and send the immutable request to its new registered target."""
     try:
@@ -682,23 +727,40 @@ def capture_latest_command(args: argparse.Namespace) -> int:
     try:
         request = load_request(args.request_directory)
         owner = read_owner()
-        if owner is not None and process_alive(owner.owner_pid):
+        if owner is not None and (process_alive(owner.owner_pid)
+                                  or (owner.browser_pid and process_alive(owner.browser_pid))):
+            probe = save_latest_probe(
+                request, user_turn_found=False, reply_found=False, live_owner_found=True,
+            )
             emit("courier_capture_latest_busy", ok=False, phase="capture_latest",
                  error_code="COURIER_BROWSER_BUSY", retry_allowed=True,
                  safe_next_action="courier_capture_latest", project_id=request.project_id,
-                 request_id=request.request_id)
+                 request_id=request.request_id, fingerprint=probe["fingerprint"],
+                 captured_at=probe["captured_at"], latest_user_turn_found=False,
+                 post_submission_reply_found=False, live_owner_found=True,
+                 submission_count=probe["submission_count"], message_sent=False)
             return 1
         with ChatSession(request, recovery=True) as session:
-            baseline = load_response_cursor(request)
             candidate = session.wait_for_reply(
-                baseline, time.monotonic() + min(60, request.workflow_window_seconds),
-                after_user_marker=(f"REQUEST_ID={request.request_id}" if baseline is None else None),
+                None, time.monotonic() + min(60, request.workflow_window_seconds),
+                after_user_marker=f"REQUEST_ID={request.request_id}",
             )
             if candidate is None:
+                diagnostic_path = request.directory / "response-diagnostic.json"
+                try: diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError): diagnostic = {}
+                probe = save_latest_probe(
+                    request, user_turn_found=bool(diagnostic.get("anchor_found")),
+                    reply_found=False, live_owner_found=False,
+                )
                 emit("courier_capture_latest_empty", ok=False, phase="capture_latest",
-                     error_code="LATEST_ASSISTANT_REPLY_NOT_FOUND", retry_allowed=True,
-                     safe_next_action="courier_capture_latest", project_id=request.project_id,
-                     request_id=request.request_id)
+                      error_code="LATEST_ASSISTANT_REPLY_NOT_FOUND", retry_allowed=True,
+                      safe_next_action="courier_retry_once" if not probe["latest_user_turn_found"] else "courier_recover",
+                      project_id=request.project_id, request_id=request.request_id,
+                      fingerprint=probe["fingerprint"], captured_at=probe["captured_at"],
+                      latest_user_turn_found=probe["latest_user_turn_found"],
+                      post_submission_reply_found=False, live_owner_found=False,
+                      submission_count=probe["submission_count"], message_sent=False)
                 return 1
             capture = save_latest_response_capture(
                 request, identity=candidate.identity, index=candidate.index, text=candidate.text,
@@ -714,9 +776,10 @@ def capture_latest_command(args: argparse.Namespace) -> int:
     envelope_present = REPLY_PROTOCOL in candidate.text
     request_match: bool | None = None
     protocol_detail: str | None = None
+    accepted_body: str | None = None
     if envelope_present:
         try:
-            parse_reply(candidate.text, request)
+            accepted_body = parse_reply(candidate.text, request).body
         except ValidationError as exc:
             request_match = False; protocol_detail = str(exc)
         else:
@@ -730,6 +793,25 @@ def capture_latest_command(args: argparse.Namespace) -> int:
         "post_submission_reply_found": capture["post_submission_reply_found"],
         "submission_count": submission_count(request),
     }
+    save_latest_probe(request, user_turn_found=True, reply_found=True, live_owner_found=False)
+    if request_match and accepted_body is not None:
+        try:
+            queue = CourierQueue(request)
+            queue.join(allow_active_recovery=True)
+            queue.complete()
+            response_path = save_response(request, accepted_body)
+            receipt(request, "response_received", "Accepted an exact reply found by read-only recovery",
+                    response_path=str(response_path))
+            event(request, "latest_response_adopted", phase="capture_latest",
+                  response_path=str(response_path), raw_sha256=capture["raw_sha256"])
+            values["response_path"] = str(response_path)
+            values["reconciled"] = True
+        except (QueueIntegrityError, RuntimeError, OSError) as exc:
+            emit("courier_capture_latest_failed", ok=False, phase="capture_latest",
+                 error_code="LATEST_CAPTURE_RECONCILIATION_FAILED", retry_allowed=True,
+                 safe_next_action="courier_capture_latest", detail=str(exc),
+                 project_id=request.project_id, request_id=request.request_id)
+            return 1
     event(request, "latest_response_captured", phase="capture_latest", **values)
     emit("courier_latest_response_captured", ok=True, phase="capture_latest",
          project_id=request.project_id, request_id=request.request_id, **values)
@@ -800,6 +882,8 @@ def main(argv: list[str] | None = None) -> int:
     typed_recover.add_argument("request_directory"); typed_recover.set_defaults(handler=recover_command)
     resend_once = sub.add_parser("courier_resend_once", help="resend the same immutable request once")
     resend_once.add_argument("request_directory"); resend_once.set_defaults(handler=resend_once_command)
+    retry_once = sub.add_parser("courier_retry_once", help="retry one apparently unsent immutable request after read-only proof")
+    retry_once.add_argument("request_directory"); retry_once.set_defaults(handler=retry_once_command)
     rollover = sub.add_parser("courier_rollover_target", help="send an exhausted request to a newly confirmed target")
     rollover.add_argument("request_directory"); rollover.set_defaults(handler=rollover_target_command)
     capture_latest = sub.add_parser("courier_capture_latest", help="capture the latest completed assistant reply without sending")

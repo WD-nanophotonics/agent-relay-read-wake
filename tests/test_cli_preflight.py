@@ -161,6 +161,67 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["error_code"], "COURIER_BROWSER_BUSY")
 
+    def test_capture_latest_empty_persists_exact_user_anchor_evidence(self):
+        class Session:
+            def __init__(self, request, *, recovery=False): self.request = request
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
+                self.request.directory.joinpath("response-diagnostic.json").write_text(
+                    json.dumps({"anchor_found": False}), encoding="utf-8")
+                return None
+            def submit(self, *_): raise AssertionError("capture-latest must never send")
+
+        with tempfile.TemporaryDirectory() as value, \
+                patch("chat_courier.cli.ChatSession", Session), \
+                patch("chat_courier.cli.read_owner", return_value=None), \
+                patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["courier_capture_latest", str(root)])
+            result = json.loads(output.getvalue().splitlines()[-1])
+            probe = json.loads((root / "latest-probe.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 1)
+        self.assertFalse(result["message_sent"])
+        self.assertFalse(result["latest_user_turn_found"])
+        self.assertEqual(result["safe_next_action"], "courier_retry_once")
+        self.assertEqual(probe["fingerprint"], result["fingerprint"])
+
+    def test_capture_latest_adopts_matching_reply_and_reconciles_queue(self):
+        class Session:
+            def __init__(self, request, *, recovery=False): self.request = request
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def wait_for_reply(self, *_args, **_kwargs):
+                return AssistantTurn(
+                    "latest-a",
+                    "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=P-1\nBEGIN_RESPONSE\nwork order\nEND_RESPONSE",
+                    9,
+                )
+        class Queue:
+            completed = False
+            def __init__(self, request): pass
+            def join(self, **kwargs): return QueueStatus("recovery_rejoined", ticket="t", position=1)
+            def complete(self): Queue.completed = True
+
+        with tempfile.TemporaryDirectory() as value, \
+                patch("chat_courier.cli.ChatSession", Session), \
+                patch("chat_courier.cli.CourierQueue", Queue), \
+                patch("chat_courier.cli.read_owner", return_value=None), \
+                patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value)); output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["courier_capture_latest", str(root)])
+            result = json.loads(output.getvalue().splitlines()[-1])
+            response = (root / "response.txt").read_text(encoding="utf-8")
+            receipt_state = json.loads((root / "receipt.json").read_text(encoding="utf-8"))["state"]
+        self.assertEqual(code, 0)
+        self.assertTrue(result["request_match"])
+        self.assertTrue(result["reconciled"])
+        self.assertTrue(Queue.completed)
+        self.assertEqual(response, "work order")
+        self.assertEqual(receipt_state, "response_received")
+
     def test_preflight_reports_auth_required_without_submit(self):
         class Session:
             def __init__(self, request, *, prepare_only=False):

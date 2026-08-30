@@ -19,6 +19,26 @@ def event(request: Request, name: str, **values: Any) -> None:
 def request_was_submitted(request: Request) -> bool:
     return submission_count(request) > 0
 
+def request_events(request: Request) -> list[dict[str, Any]]:
+    path = request.directory / "events.jsonl"
+    if not path.exists(): return []
+    result: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try: value = json.loads(line)
+                except json.JSONDecodeError: continue
+                if (isinstance(value, dict) and value.get("project_id") == request.project_id
+                        and value.get("request_id") == request.request_id):
+                    result.append(value)
+    except OSError as exc:
+        raise ValidationError(f"cannot read request events: {path}") from exc
+    return result
+
+def evidence_retry_count(request: Request) -> int:
+    return sum(value.get("event") == "evidence_retry_authorized"
+               for value in request_events(request))
+
 def submission_count(request: Request, *, total: bool = False) -> int:
     path = request.directory / "events.jsonl"
     if not path.exists(): return 0
@@ -117,6 +137,30 @@ def save_latest_response_capture(request: Request, *, identity: str, index: int,
     value.update({"latest_user_turn_found": user_turn_found,
                   "post_submission_reply_found": True})
     atomic_json(request.directory / "latest-response-capture.json", value)
+    return value
+
+def latest_probe_path(request: Request) -> Path: return request.directory / "latest-probe.json"
+def save_latest_probe(request: Request, *, user_turn_found: bool,
+                      reply_found: bool, live_owner_found: bool) -> dict[str, Any]:
+    value = {
+        "version": 1, "project_id": request.project_id, "request_id": request.request_id,
+        "fingerprint": request.fingerprint, "captured_at": time.time(),
+        "latest_user_turn_found": bool(user_turn_found),
+        "post_submission_reply_found": bool(reply_found),
+        "live_owner_found": bool(live_owner_found),
+        "submission_count": submission_count(request), "message_sent": False,
+    }
+    atomic_json(latest_probe_path(request), value)
+    return value
+def load_latest_probe(request: Request) -> dict[str, Any]:
+    path = latest_probe_path(request)
+    try: value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError("a valid latest-response probe is required") from exc
+    if (not isinstance(value, dict) or value.get("project_id") != request.project_id
+            or value.get("request_id") != request.request_id
+            or value.get("fingerprint") != request.fingerprint):
+        raise ValidationError("latest-response probe does not belong to this request")
     return value
 
 def archive_response_capture(request: Request, attempt: int) -> None:

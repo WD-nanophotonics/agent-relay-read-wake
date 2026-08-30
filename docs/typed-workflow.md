@@ -9,6 +9,8 @@ courier_dispatch
 courier_status
 courier_wait
 courier_recover
+courier_capture_latest
+courier_retry_once
 ```
 
 An administrator first binds each project to one registered Chat conversation,
@@ -26,3 +28,13 @@ request; reusing the key with different bytes fails closed.
 receipt before deciding whether submission or same-request recovery is safe.
 `courier_recover` accepts only post-submission recovery states and never
 creates a replacement request.
+
+`courier_capture_latest` is a read-only exact-request probe. It records an
+atomic, fingerprint-bound `latest-probe.json` even when no reply is found.
+`courier_retry_once` may re-enter the original immutable request only when a
+fresh probe found neither its user turn nor a reply, no submission evidence or
+live browser owner exists, and the request has never consumed its evidence
+retry budget. It records authorization before attempting the retry. A second
+evidence retry is always refused. A confirmed user turn remains recovery-only;
+only the separately bounded `courier_resend_once` operation can perform a true
+second submission.

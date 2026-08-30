@@ -174,6 +174,14 @@ fields express only the local Agent's preference.
 
 If a run was interrupted after visible submission, rerunning the same request
 directory performs a read-only recovery and does not resend the request. A
+caller may first use `courier_capture_latest` to persist exact-request presence
+evidence without sending. For the narrow crash gap where the browser started
+but neither the exact user turn nor a submission event exists,
+`courier_retry_once` permits one fingerprint-bound retry of the unchanged
+request. It requires a fresh probe, no live Courier/browser owner, no response,
+and no prior evidence retry. It never changes the URL, profile, request ID, or
+payload. If the user turn exists, the request remains recovery-only and this
+operation refuses to resend it.
 received request is idempotent. Reusing its directory with changed input is
 rejected.
 
