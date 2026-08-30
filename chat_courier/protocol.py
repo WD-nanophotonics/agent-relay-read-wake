@@ -11,6 +11,11 @@ def is_chat_ui_error(text: str) -> bool:
         "this content can't be shown"
     )
 
+def is_conversation_exhausted(text: str) -> bool:
+    """Recognize Chat's terminal per-conversation length notice."""
+    normalized = " ".join(text.replace("’", "'").split()).casefold()
+    return normalized.startswith("you've reached the maximum length for this conversation")
+
 @dataclass(frozen=True)
 class Reply:
     project_id: str; request_id: str; body: str; raw: str

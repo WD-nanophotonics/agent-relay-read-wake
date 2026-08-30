@@ -19,7 +19,7 @@ def event(request: Request, name: str, **values: Any) -> None:
 def request_was_submitted(request: Request) -> bool:
     return submission_count(request) > 0
 
-def submission_count(request: Request) -> int:
+def submission_count(request: Request, *, total: bool = False) -> int:
     path = request.directory / "events.jsonl"
     if not path.exists(): return 0
     count = 0
@@ -28,6 +28,10 @@ def submission_count(request: Request) -> int:
             for line in handle:
                 try: value = json.loads(line)
                 except json.JSONDecodeError: continue
+                if (not total and value.get("event") == "target_rollover_authorized"
+                        and value.get("project_id") == request.project_id
+                        and value.get("request_id") == request.request_id):
+                    count = 0
                 if (value.get("event") == "request_submitted"
                         and value.get("project_id") == request.project_id
                         and value.get("request_id") == request.request_id):
@@ -35,6 +39,22 @@ def submission_count(request: Request) -> int:
     except OSError as exc:
         raise ValidationError(f"cannot read request events: {path}") from exc
     return count
+
+def archive_target_generation(request: Request) -> Path:
+    """Preserve the exhausted target's state before a user-authorized rollover."""
+    generation = 1
+    while (request.directory / f"target-generation-{generation}").exists():
+        generation += 1
+    target = request.directory / f"target-generation-{generation}"
+    target.mkdir()
+    for name in (
+        "receipt.json", "response.txt", "response.raw.txt", "response-capture.json",
+        "latest-response.raw.txt", "latest-response-capture.json", "response-cursor.json",
+    ):
+        source = request.directory / name
+        if source.exists():
+            os.replace(source, target / name)
+    return target
 def receipt(request: Request, state: str, detail: str, **values: Any) -> None:
     # Queue provenance survives later state transitions such as
     # request_submitted and response_received, so an Agent can audit both the

@@ -11,9 +11,9 @@ import time
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
-from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, parse_reply
+from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
-from .storage import (archive_response_capture, event, load_receipt, load_response_capture,
+from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
                       load_response_cursor, receipt, request_was_submitted,
                       save_latest_response_capture, save_response, save_response_capture,
                       submission_count)
@@ -644,6 +644,35 @@ def resend_once_command(args: argparse.Namespace) -> int:
     return run_command(args)
 
 
+def rollover_target_command(args: argparse.Namespace) -> int:
+    """Move one exhausted conversation aside and send the immutable request to its new registered target."""
+    try:
+        request = load_request(args.request_directory)
+        response_path = request.directory / "response.txt"
+        if not response_path.is_file() or not is_conversation_exhausted(
+            response_path.read_text(encoding="utf-8-sig")
+        ):
+            raise ValidationError("the prior target is not proven conversation-exhausted")
+        prior = json.loads((request.directory / "receipt.json").read_text(encoding="utf-8"))
+        if (not isinstance(prior, dict) or prior.get("project_id") != request.project_id
+                or prior.get("request_id") != request.request_id
+                or prior.get("fingerprint") == request.fingerprint):
+            raise ValidationError("a confirmed target change is not proven")
+        prior_count = submission_count(request, total=True)
+        archive = archive_target_generation(request)
+        event(request, "target_rollover_authorized", phase="target_rollover",
+              prior_total_submission_count=prior_count,
+              prior_fingerprint=prior.get("fingerprint"),
+              active_fingerprint=request.fingerprint,
+              archive_directory=archive.name)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+        emit("courier_target_rollover_refused", ok=False, phase="target_rollover",
+             detail=str(exc), error_code="COURIER_TARGET_ROLLOVER_NOT_PROVEN")
+        return 2
+    args.resend_once = False
+    return run_command(args)
+
+
 def capture_latest_command(args: argparse.Namespace) -> int:
     """Capture the latest completed assistant turn without sending anything."""
     try:
@@ -767,6 +796,8 @@ def main(argv: list[str] | None = None) -> int:
     typed_recover.add_argument("request_directory"); typed_recover.set_defaults(handler=recover_command)
     resend_once = sub.add_parser("courier_resend_once", help="resend the same immutable request once")
     resend_once.add_argument("request_directory"); resend_once.set_defaults(handler=resend_once_command)
+    rollover = sub.add_parser("courier_rollover_target", help="send an exhausted request to a newly confirmed target")
+    rollover.add_argument("request_directory"); rollover.set_defaults(handler=rollover_target_command)
     capture_latest = sub.add_parser("courier_capture_latest", help="capture the latest completed assistant reply without sending")
     capture_latest.add_argument("request_directory"); capture_latest.set_defaults(handler=capture_latest_command)
     args = parser.parse_args(argv)

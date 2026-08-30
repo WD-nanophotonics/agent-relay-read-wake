@@ -11,7 +11,7 @@ from chat_courier.storage import (load_receipt, load_response_capture, load_resp
                                   receipt, save_response, save_response_capture,
                                   save_response_cursor, submission_count)
 from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confirmed,
-                              resend_once_command)
+                              resend_once_command, rollover_target_command)
 
 
 class StorageTests(unittest.TestCase):
@@ -98,6 +98,36 @@ class StorageTests(unittest.TestCase):
                 (request.directory / "attempt-1-response.txt").read_text(encoding="utf-8"),
                 "This content can't be shown",
             )
+
+    def test_user_confirmed_target_rollover_preserves_old_state_and_resets_active_count(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            (root / "message.txt").write_text("immutable report", encoding="utf-8")
+            (root / "request.json").write_text(json.dumps({
+                "version": 1, "project_id": "P", "request_id": "P-1",
+            }), encoding="utf-8")
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/old"}):
+                old_request = load_request(root)
+            receipt(old_request, "response_received", "old target exhausted")
+            (root / "response.txt").write_text(
+                "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.",
+                encoding="utf-8",
+            )
+            (root / "events.jsonl").write_text(
+                "\n".join(json.dumps({"event": "request_submitted", "project_id": "P",
+                                       "request_id": "P-1"}) for _ in range(2)) + "\n",
+                encoding="utf-8",
+            )
+            args = type("Args", (), {"request_directory": str(root)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/new"}), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(rollover_target_command(args), 0)
+                run.assert_called_once_with(args)
+                active_request = load_request(root)
+            self.assertEqual(submission_count(active_request), 0)
+            self.assertEqual(submission_count(active_request, total=True), 2)
+            self.assertTrue((root / "target-generation-1" / "receipt.json").is_file())
+            self.assertTrue((root / "target-generation-1" / "response.txt").is_file())
 
     def test_queue_provenance_survives_final_receipt_transition(self):
         with tempfile.TemporaryDirectory() as value:
