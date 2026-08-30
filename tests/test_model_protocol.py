@@ -52,6 +52,20 @@ class ModelProtocolTests(unittest.TestCase):
             self.assertIn("manual-book-level", prompt)
             self.assertIn("REQUEST_ID=TEST-001", prompt)
 
+    def test_mephc_closeout_prompt_bootstraps_machine_contract_in_a_fresh_chat(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.make_request(Path(value), flow_schema="mephc-fixed-closeout-v2")
+            prompt = build_prompt(request)
+            self.assertIn("MEPHC THIN FLOW REPLY CONTRACT", prompt)
+            self.assertIn("NEXT_WORK_ORDER_ID=", prompt)
+            self.assertIn("WORK_ORDER_CONTRACT_JSON=", prompt)
+            self.assertIn("mephc-science-work-order-v1", prompt)
+
+    def test_generic_prompt_does_not_receive_mephc_contract(self):
+        with tempfile.TemporaryDirectory() as value:
+            prompt = build_prompt(self.make_request(Path(value)))
+            self.assertNotIn("MEPHC THIN FLOW REPLY CONTRACT", prompt)
+
     def test_attachment_cannot_escape_directory(self):
         with tempfile.TemporaryDirectory() as value:
             with self.assertRaises(ValidationError): self.make_request(Path(value), attachments=["../secret.txt"])
