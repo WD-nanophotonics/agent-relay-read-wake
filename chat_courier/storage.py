@@ -125,8 +125,11 @@ def archive_response_capture(request: Request, attempt: int) -> None:
         source = request.directory / name
         if source.exists():
             target = request.directory / f"attempt-{attempt}-{name}"
-            if not target.exists():
-                os.replace(source, target)
+            serial = 2
+            while target.exists():
+                target = request.directory / f"attempt-{attempt}-{serial}-{name}"
+                serial += 1
+            os.replace(source, target)
 def load_response_capture(request: Request) -> tuple[dict[str, Any], str] | None:
     path = response_capture_path(request)
     if not path.exists(): return None

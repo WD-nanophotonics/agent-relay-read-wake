@@ -99,6 +99,26 @@ class StorageTests(unittest.TestCase):
                 "This content can't be shown",
             )
 
+    def test_resend_archive_never_leaves_current_capture_when_prior_name_exists(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            (request.directory / "events.jsonl").write_text(
+                json.dumps({"event": "request_submitted", "project_id": "P",
+                            "request_id": "P-1"}) + "\n", encoding="utf-8")
+            for name in ("response.txt", "response.raw.txt", "response-capture.json"):
+                (request.directory / f"attempt-1-{name}").write_text("old", encoding="utf-8")
+                (request.directory / name).write_text("current", encoding="utf-8")
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.run_command", return_value=0):
+                self.assertEqual(resend_once_command(args), 0)
+            for name in ("response.txt", "response.raw.txt", "response-capture.json"):
+                self.assertFalse((request.directory / name).exists())
+                self.assertEqual(
+                    (request.directory / f"attempt-1-2-{name}").read_text(encoding="utf-8"),
+                    "current",
+                )
+
     def test_user_confirmed_target_rollover_preserves_old_state_and_resets_active_count(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
