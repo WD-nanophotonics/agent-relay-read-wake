@@ -27,6 +27,13 @@ def build_prompt(request: Request) -> str:
     elif request.task_difficulty == "challenge": preferences.append("The local Agent requests a challenging, long-span, complex, specialized task. ChatGPT retains final authority and may reduce it.")
     if request.instruction_level == "detailed": preferences.append("The local Agent requests a more detailed work order. ChatGPT retains final authority over detail.")
     elif request.instruction_level == "manual_book": preferences.append("The local Agent requests a manual-book-level work order with a plan, concrete rules, and pseudocode where useful. ChatGPT retains final authority.")
+    if request.report_policy in {"adaptive", "milestone", "final-only"}:
+        span = "the next substantive milestone" if request.report_policy != "final-only" else "the complete remaining objective"
+        preferences.append(
+            f"The local Agent requests one self-contained work order covering {span}. "
+            "Bundle locally resolvable implementation, testing, diagnosis, and recertification into that work order. "
+            "Do not issue a separate diagnostic-only or corrective-only successor unless new scientific judgment, budget, or authority is required."
+        )
     workflow_contract = ""
     try:
         manifest = json.loads((request.directory / "request.json").read_text(encoding="utf-8-sig"))

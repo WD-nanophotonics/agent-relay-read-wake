@@ -52,6 +52,26 @@ class ModelProtocolTests(unittest.TestCase):
             self.assertIn("manual-book-level", prompt)
             self.assertIn("REQUEST_ID=TEST-001", prompt)
 
+    def test_milestone_query_requests_one_self_contained_successor(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.make_request(Path(value), task_difficulty="challenge",
+                                        instruction_level="manual_book", report_policy="milestone")
+            prompt = build_prompt(request)
+            self.assertIn("challenging, long-span", prompt)
+            self.assertIn("manual-book-level", prompt)
+            self.assertIn("one self-contained work order covering the next substantive milestone", prompt)
+            self.assertIn("Do not issue a separate diagnostic-only or corrective-only successor", prompt)
+
+    def test_report_policy_is_validated_and_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            milestone = self.make_request(root, report_policy="milestone")
+            self.assertEqual(milestone.report_policy, "milestone")
+            fingerprint = milestone.fingerprint
+            self.assertNotEqual(fingerprint, self.make_request(root, report_policy="final-only").fingerprint)
+            with self.assertRaises(ValidationError):
+                self.make_request(root, report_policy="chatty")
+
     def test_mephc_closeout_prompt_bootstraps_machine_contract_in_a_fresh_chat(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.make_request(Path(value), flow_schema="mephc-fixed-closeout-v2")

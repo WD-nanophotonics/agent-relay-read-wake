@@ -68,7 +68,8 @@ def _read_utf8(path: Path, description: str) -> str:
 class Request:
     directory: Path; project_id: str; request_id: str; message_path: Path; message: str
     attachments: tuple[Path, ...]; workflow_window_seconds: int; queue_wait_seconds: int; task_difficulty: str
-    instruction_level: str; chat_url: str; fingerprint: str; retry_message: str | None = None
+    instruction_level: str; report_policy: str; chat_url: str; fingerprint: str
+    retry_message: str | None = None
 
 def registry_path() -> Path: return runtime_root() / "chat_urls.json"
 def pending_registry_path() -> Path: return runtime_root() / "pending_chat_url_registrations.json"
@@ -174,6 +175,8 @@ def load_request(directory: str | Path) -> Request:
     difficulty, detail = raw.get("task_difficulty", "normal"), raw.get("instruction_level", "normal")
     if difficulty not in {"normal", "hard", "challenge"}: raise ValidationError("task_difficulty must be normal, hard, or challenge")
     if detail not in {"normal", "detailed", "manual_book"}: raise ValidationError("instruction_level must be normal, detailed, or manual_book")
+    report_policy = raw.get("report_policy", "per-work-order")
+    if report_policy not in {"adaptive", "per-work-order", "milestone", "final-only"}: raise ValidationError("report_policy must be adaptive, per-work-order, milestone, or final-only")
     explicit_url = raw.get("chat_url")
     if explicit_url is not None and not valid_chat_url(explicit_url): raise ValidationError("chat_url must be an HTTPS ChatGPT conversation URL")
     registered_url = _load_registry().get(project_id)
@@ -182,9 +185,11 @@ def load_request(directory: str | Path) -> Request:
         raise ValidationError("request chat_url does not match the registered URL; propose and confirm a registration change instead")
     chat_url = registered_url
     digest = hashlib.sha256(); metadata = {"project_id": project_id, "request_id": request_id, "message_file": message_path.name, "attachments": values, "workflow_window_seconds": window, "task_difficulty": difficulty, "instruction_level": detail, "chat_url": chat_url}
+    # Preserve fingerprints of legacy requests that predate this optional preference.
+    if "report_policy" in raw: metadata["report_policy"] = report_policy
     if retry_path: metadata["retry_message_file"] = retry_path.name
     metadata["queue_wait_seconds"] = queue_wait
     digest.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")); digest.update(message_path.read_bytes())
     if retry_path: digest.update(retry_path.read_bytes())
     for path in attachments: digest.update(path.name.encode("utf-8")); digest.update(path.read_bytes())
-    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, chat_url, digest.hexdigest(), retry_message)
+    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, report_policy, chat_url, digest.hexdigest(), retry_message)
