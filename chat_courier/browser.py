@@ -234,6 +234,20 @@ class ChatDom:
             try:
                 fresh_composer = self.composer()
                 fresh_composer.focus(timeout=5000)
+                if len(text) > 32768:
+                    fresh_composer.evaluate(
+                        """(el, value) => {
+                            el.focus();
+                            document.execCommand('selectAll', false, null);
+                            if (!document.execCommand('insertText', false, value)) {
+                                throw new Error('execCommand insertText was rejected');
+                            }
+                        }""",
+                        text,
+                    )
+                    if self.composer_text(fresh_composer) != text:
+                        raise RuntimeError("large composer DOM insertion did not round-trip")
+                    return "dom_insert_text"
                 self.page.keyboard.press("ControlOrMeta+A")
                 self.page.keyboard.press("Backspace")
                 self.page.keyboard.insert_text(text)

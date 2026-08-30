@@ -154,6 +154,26 @@ class BrowserContractTests(unittest.TestCase):
         self.assertEqual(page.keyboard.inserted, "plain text")
         self.assertEqual(page.keyboard.pressed, ["ControlOrMeta+A", "Backspace"])
 
+    def test_large_contenteditable_fill_uses_bounded_dom_insertion(self):
+        value = "x" * 40000
+        class Composer:
+            def __init__(self): self.value = ""
+            def count(self): return 1
+            def is_visible(self): return True
+            def is_editable(self): return True
+            def focus(self, **_kwargs): return None
+            def fill(self, *_args, **_kwargs): raise RuntimeError("fill actionability timeout")
+            def evaluate(self, _script, text=None):
+                if text is None: return "DIV"
+                self.value = text
+            def inner_text(self): return self.value
+        class Page:
+            def __init__(self): self.composer = Composer()
+            def locator(self, _selector): return type("Locator", (), {"last": self.composer})()
+        page = Page()
+        self.assertEqual(ChatDom(page).fill_composer(page.composer, value), "dom_insert_text")
+        self.assertEqual(page.composer.value, value)
+
     def test_send_button_uses_force_click_after_normal_click_failure(self):
         class Button:
             def count(self): return 1

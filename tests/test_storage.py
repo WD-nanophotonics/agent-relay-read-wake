@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_courier.model import ValidationError, load_request
-from chat_courier.storage import (load_receipt, load_response_capture, load_response_cursor,
+from chat_courier.storage import (event, load_receipt, load_response_capture, load_response_cursor,
                                   receipt, save_latest_probe, save_response, save_response_capture,
                                   save_response_cursor, submission_count)
 from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confirmed,
@@ -93,6 +93,22 @@ class StorageTests(unittest.TestCase):
                 self.assertTrue(args.use_retry_message)
                 self.assertEqual(load_request(request.directory).retry_message, "compact message")
                 run.assert_called_once_with(args)
+
+    def test_supervisor_resend_allows_one_zero_submission_retry_after_evidence_retry(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            receipt(request, "submission_intent", "stalled before send")
+            event(request, "evidence_retry_authorized", phase="retry")
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(resend_once_command(args), 0)
+                self.assertTrue(args.evidence_retry)
+                run.assert_called_once_with(args)
+                self.assertEqual(resend_once_command(args), 2)
 
     def test_evidence_retry_allows_one_unsent_browser_started_request(self):
         with tempfile.TemporaryDirectory() as value:

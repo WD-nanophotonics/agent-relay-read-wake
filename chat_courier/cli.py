@@ -637,17 +637,35 @@ def resend_once_command(args: argparse.Namespace) -> int:
     try:
         request = load_request(args.request_directory)
         count = submission_count(request)
-        if count != 1:
+        events = request_events(request)
+        supervisor_zero_submission = count == 0 and evidence_retry_count(request) == 1
+        if supervisor_zero_submission:
+            probe = load_latest_probe(request)
+            owner = read_owner()
+            owner_live = bool(owner and (process_alive(owner.owner_pid)
+                                        or (owner.browser_pid and process_alive(owner.browser_pid))))
+            if (time.time() - float(probe.get("captured_at", 0)) > 300
+                    or probe.get("fingerprint") != request.fingerprint
+                    or probe.get("latest_user_turn_found")
+                    or probe.get("post_submission_reply_found")
+                    or probe.get("live_owner_found") or owner_live
+                    or any(value.get("event") == "supervisor_retry_authorized" for value in events)):
+                raise ValidationError("Supervisor zero-submission retry lacks fresh exclusive evidence")
+            event(request, "supervisor_retry_authorized", phase="resend",
+                  probe_captured_at=probe["captured_at"], probe_fingerprint=probe["fingerprint"])
+        elif count != 1:
             emit("courier_resend_refused", ok=False, phase="resend",
                  error_code="COURIER_RESEND_LIMIT_OR_STATE", retry_allowed=False,
                  project_id=request.project_id, request_id=request.request_id,
                  submission_count=count)
             return 2
-        archive_response_capture(request, 1)
+        if count == 1:
+            archive_response_capture(request, 1)
     except ValidationError as exc:
         emit("courier_resend_refused", ok=False, phase="resend", detail=str(exc))
         return 2
     args.resend_once = True
+    args.evidence_retry = supervisor_zero_submission
     args.use_retry_message = bool(request.retry_message)
     return run_command(args)
 
