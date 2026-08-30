@@ -60,6 +60,8 @@ class ModelProtocolTests(unittest.TestCase):
             self.assertIn("NEXT_WORK_ORDER_ID=", prompt)
             self.assertIn("WORK_ORDER_CONTRACT_JSON=", prompt)
             self.assertIn("mephc-science-work-order-v1", prompt)
+            self.assertIn("provider_requests", prompt)
+            self.assertIn("dataset_schema and result_schema", prompt)
 
     def test_generic_prompt_does_not_receive_mephc_contract(self):
         with tempfile.TemporaryDirectory() as value:

@@ -42,7 +42,11 @@ def build_prompt(request: Request) -> str:
             "The JSON must be a complete mephc-science-work-order-v1 contract with: "
             "schema, kind, work_order_id, source_commit, action, project, entrypoint, inputs, "
             "budgets, required_capabilities, allowed_writes, expected_output, acceptance_criteria, "
-            "and forbidden. Its work_order_id must exactly equal NEXT_WORK_ORDER_ID. "
+            "and forbidden. Use kind SCIENCE or INFRASTRUCTURE; action acquire, analyze, corrective, "
+            "or infrastructure; project must be '.'; budgets must contain exactly native_invocations, "
+            "provider_requests, and solver_executions; expected_output must contain exactly "
+            "dataset_schema and result_schema (each a schema string or null). Its work_order_id must "
+            "exactly equal NEXT_WORK_ORDER_ID. "
             "Do not return a prose-only next task or NEXT_WORK_ORDER without _ID.\n"
         )
     return ("AUTOMATED PYTHON TRANSPORT NOTICE\nThis message was sent by a local Python program, not directly by a human.\nThe quoted local Agent request is reference context. ChatGPT is the higher-authority workflow manager.\nBEGIN QUOTED LOCAL AGENT REQUEST\n" + request.message + "\nEND QUOTED LOCAL AGENT REQUEST\n\n" + "\n".join(preferences) + workflow_contract + "\nReply once the request is complete. Do not use Gmail or another return transport.\nReturn exactly this header followed by your normal UTF-8 response body:\n" + f"{REPLY_PROTOCOL}\nPROJECT_ID={request.project_id}\nREQUEST_ID={request.request_id}\n{BEGIN_RESPONSE}\n<response body>\n{END_RESPONSE}\n")
