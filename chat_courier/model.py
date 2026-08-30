@@ -68,7 +68,7 @@ def _read_utf8(path: Path, description: str) -> str:
 class Request:
     directory: Path; project_id: str; request_id: str; message_path: Path; message: str
     attachments: tuple[Path, ...]; workflow_window_seconds: int; queue_wait_seconds: int; task_difficulty: str
-    instruction_level: str; chat_url: str; fingerprint: str
+    instruction_level: str; chat_url: str; fingerprint: str; retry_message: str | None = None
 
 def registry_path() -> Path: return runtime_root() / "chat_urls.json"
 def pending_registry_path() -> Path: return runtime_root() / "pending_chat_url_registrations.json"
@@ -152,6 +152,14 @@ def load_request(directory: str | Path) -> Request:
     if message_path.parent != root: raise ValidationError("message_file must be directly inside the request directory")
     message = _read_utf8(message_path, "message_file")
     if not message.strip(): raise ValidationError("message_file must not be empty")
+    retry_message = None
+    retry_name = raw.get("retry_message_file")
+    retry_path = None
+    if retry_name is not None:
+        retry_path = (root / _safe_relative(retry_name, "retry_message_file")).resolve()
+        if retry_path.parent != root: raise ValidationError("retry_message_file must be directly inside the request directory")
+        retry_message = _read_utf8(retry_path, "retry_message_file")
+        if not retry_message.strip(): raise ValidationError("retry_message_file must not be empty")
     values = raw.get("attachments", [])
     if not isinstance(values, list) or not all(isinstance(item, str) for item in values): raise ValidationError("attachments must be a list of relative file paths")
     attachments: list[Path] = []
@@ -174,7 +182,9 @@ def load_request(directory: str | Path) -> Request:
         raise ValidationError("request chat_url does not match the registered URL; propose and confirm a registration change instead")
     chat_url = registered_url
     digest = hashlib.sha256(); metadata = {"project_id": project_id, "request_id": request_id, "message_file": message_path.name, "attachments": values, "workflow_window_seconds": window, "task_difficulty": difficulty, "instruction_level": detail, "chat_url": chat_url}
+    if retry_path: metadata["retry_message_file"] = retry_path.name
     metadata["queue_wait_seconds"] = queue_wait
     digest.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")); digest.update(message_path.read_bytes())
+    if retry_path: digest.update(retry_path.read_bytes())
     for path in attachments: digest.update(path.name.encode("utf-8")); digest.update(path.read_bytes())
-    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, chat_url, digest.hexdigest())
+    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, chat_url, digest.hexdigest(), retry_message)

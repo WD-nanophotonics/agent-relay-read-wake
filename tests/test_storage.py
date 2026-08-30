@@ -15,9 +15,14 @@ from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confi
 
 
 class StorageTests(unittest.TestCase):
-    def request(self, root: Path):
+    def request(self, root: Path, retry: bool = False):
         (root / "message.txt").write_text("message", encoding="utf-8")
-        (root / "request.json").write_text(json.dumps({"version": 1, "project_id": "P", "request_id": "P-1", "chat_url": "https://chatgpt.com/c/x"}), encoding="utf-8")
+        manifest = {"version": 1, "project_id": "P", "request_id": "P-1",
+                    "chat_url": "https://chatgpt.com/c/x"}
+        if retry:
+            (root / "retry-message.txt").write_text("compact message", encoding="utf-8")
+            manifest["retry_message_file"] = "retry-message.txt"
+        (root / "request.json").write_text(json.dumps(manifest), encoding="utf-8")
         with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
             return load_request(root)
 
@@ -74,6 +79,20 @@ class StorageTests(unittest.TestCase):
                     patch("chat_courier.cli.run_command") as run:
                 self.assertEqual(resend_once_command(args), 2)
                 run.assert_not_called()
+
+    def test_same_request_resend_selects_optional_compact_message(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value), retry=True)
+            (request.directory / "events.jsonl").write_text(
+                json.dumps({"event": "request_submitted", "project_id": "P",
+                            "request_id": "P-1"}) + "\n", encoding="utf-8")
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(resend_once_command(args), 0)
+                self.assertTrue(args.use_retry_message)
+                self.assertEqual(load_request(request.directory).retry_message, "compact message")
+                run.assert_called_once_with(args)
 
     def test_resend_archives_a_previously_accepted_ui_error(self):
         with tempfile.TemporaryDirectory() as value:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -480,6 +481,8 @@ def _wait_for_queue(request, previous: dict | None) -> tuple[CourierQueue | None
 def run_command(args: argparse.Namespace) -> int:
     try:
         request = load_request(args.request_directory)
+        if bool(getattr(args, "use_retry_message", False)) and request.retry_message:
+            request = replace(request, message=request.retry_message)
         previous = load_receipt(request)
     except ValidationError as exc:
         emit("validation_failed", ok=False, phase="validate", detail=str(exc))
@@ -641,6 +644,7 @@ def resend_once_command(args: argparse.Namespace) -> int:
         emit("courier_resend_refused", ok=False, phase="resend", detail=str(exc))
         return 2
     args.resend_once = True
+    args.use_retry_message = bool(request.retry_message)
     return run_command(args)
 
 

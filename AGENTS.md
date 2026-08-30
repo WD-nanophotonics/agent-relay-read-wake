@@ -98,6 +98,12 @@ The request ID is single-use. Never edit `request.json`, `message.txt`, or an
 attached file after the first receipt is written. A changed request needs a new
 directory and new ID.
 
+A project bridge may create an optional immutable `retry_message_file` before
+the first validation. It is included in the original request fingerprint and
+may be selected only by the bounded `courier_resend_once` operation. This is a
+second wording attempt for the same logical request, not a new request or an
+authorization to edit either message after submission.
+
 ### Terminal-event branches
 
 | Courier result | Correct Agent action |
@@ -109,7 +115,7 @@ directory and new ID.
 | `courier_interrupted` | The calling environment sent Ctrl+C. `interruption_stage=pre_browser` is safe to retry once with the same unchanged request; any later stage is fail-closed. If it repeats with the same `courier_build_id` and execution host, stop and report an execution-host interruption. A verified Courier source repair with a different build ID permits one further same-request pre-browser retry; it never permits changing the request, profile, URL, or transport. Do not use backgrounding, `nohup`, `setsid`, another browser, or another transport as a workaround. |
 | `submission_not_started` | Read `receipt.json` and `transport_diagnostic.json`. No Send occurred; after the browser condition is resolved, the same unchanged directory may be run again. Decide any alternative evidence strategy outside Courier. |
 | `chat_submission_unconfirmed` | Treat external Send as uncertain. Do not resend or create another request ID; rerun the same unchanged directory only for Courier's read-only recovery. |
-| `response_timeout` or `response_protocol_error` | Send was already confirmed. Do not submit again; rerun the same unchanged directory only to search/read the existing reply. |
+| `response_timeout` or `response_protocol_error` | Send was already confirmed. Search/read first; a project bridge may then use its single bounded resend with the pre-registered immutable retry message. |
 | `chat_composer_not_ready` | The page is visible but cannot safely accept text. Report the snapshot; do not create a replacement Chat or use another transport. |
 | `chat_auth_required`, `chat_access_denied`, `chat_target_mismatch`, `configuration_error`, or `browser_error` before submission | Stop and report the structured event. Do not change profile variables, create a new Chat, or route around Courier. |
 
