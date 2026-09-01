@@ -11,7 +11,7 @@ import time
 
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
-from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
+from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
@@ -165,6 +165,52 @@ def confirm_register_command(args: argparse.Namespace) -> int:
         return 2
     emit("chat_url_registered", ok=True, phase="confirm_register", **value)
     return 0
+
+
+def quiescence_command(_args: argparse.Namespace) -> int:
+    """Read-only proof that no queue entry or browser owner remains."""
+    queue_path = runtime_root() / "queue.json"
+    try:
+        if queue_path.exists():
+            raw = json.loads(queue_path.read_text(encoding="utf-8"))
+            if (not isinstance(raw, dict) or raw.get("version") != 1
+                    or not isinstance(raw.get("entries"), list)):
+                raise ValueError("invalid queue schema")
+            entries = raw["entries"]
+        else:
+            entries = []
+        owner = read_owner()
+    except (OSError, ValueError, json.JSONDecodeError, OwnerBusy) as exc:
+        emit("courier_quiescence", ok=False, phase="quiescence",
+             quiescent=False, detail=str(exc))
+        return 2
+
+    queue_entries = [
+        {
+            "project_id": entry.get("project_id"),
+            "request_id": entry.get("request_id"),
+            "state": entry.get("state"),
+            "process_live": process_alive(int(entry.get("pid", 0))),
+        }
+        for entry in entries if isinstance(entry, dict)
+    ]
+    owner_summary = None
+    owner_live = browser_live = False
+    if owner is not None:
+        owner_live = process_alive(owner.owner_pid)
+        browser_live = bool(owner.browser_pid and process_alive(owner.browser_pid))
+        owner_summary = {
+            "project_id": owner.project_id,
+            "request_id": owner.request_id,
+            "phase": owner.phase,
+            "owner_live": owner_live,
+            "browser_live": browser_live,
+        }
+    quiescent = not queue_entries and owner is None
+    emit("courier_quiescence", ok=quiescent, phase="quiescence",
+         quiescent=quiescent, queue_entries=queue_entries,
+         owner=owner_summary, owner_live=owner_live, browser_live=browser_live)
+    return 0 if quiescent else 1
 
 
 def _capture_response(session: ChatSession, request, baseline: set[str] | None, deadline: float,
@@ -874,6 +920,8 @@ def main(argv: list[str] | None = None) -> int:
     confirm.add_argument("--basis", required=True, choices=["user_direct", "prior_authorization"]); confirm.set_defaults(handler=confirm_register_command)
     typed_capabilities = sub.add_parser("courier_capabilities", help="show typed Courier capabilities")
     typed_capabilities.set_defaults(handler=capabilities_command)
+    quiescence = sub.add_parser("courier_quiescence", help="read-only handoff safety check")
+    quiescence.set_defaults(handler=quiescence_command)
     configure = sub.add_parser("configure-project", help="administratively bind one project policy")
     configure.add_argument("--project-id", required=True); configure.add_argument("--outbox-root", required=True)
     configure.add_argument("--artifact-root", action="append", required=True)

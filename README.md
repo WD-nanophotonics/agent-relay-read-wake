@@ -4,6 +4,17 @@ ChatCourier is a bounded Python transport for one local Agent request and one
 completed ChatGPT response. It does not use Gmail, AgentRelay, a watchdog, or
 a background service.
 
+For a portable Windows checkout, create `.venv` in this repository and install
+the package with `py -3.12 -m venv .venv` followed by
+`.venv\Scripts\python.exe -m pip install -e .`. The command launcher prefers
+that repository-owned environment, then an operator-configured Python, and
+finally the legacy per-user Python location.
+
+`scripts\chat-courier.cmd courier_quiescence` is a read-only handoff check. It
+returns success only when the durable queue is empty and no Courier owner
+record exists. It never prunes a queue, kills Chrome, sends a message, or
+changes project registration.
+
 ```text
 request directory → Chrome → fixed ChatGPT conversation → response.txt → close
 ```

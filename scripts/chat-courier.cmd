@@ -10,13 +10,15 @@ if not exist "%COURIER_ROOT%\chat_courier\cli.py" (
 
 rem CHAT_COURIER_PYTHON is a human/operator setup value. Calling Agents must
 rem use this launcher without changing it.
-if defined CHAT_COURIER_PYTHON (
+if exist "%COURIER_ROOT%\.venv\Scripts\python.exe" (
+    set "COURIER_PYTHON=%COURIER_ROOT%\.venv\Scripts\python.exe"
+) else if defined CHAT_COURIER_PYTHON (
     set "COURIER_PYTHON=%CHAT_COURIER_PYTHON%"
 ) else (
     set "COURIER_PYTHON=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 )
 if not exist "%COURIER_PYTHON%" (
-    echo {"event":"configuration_error","ok":false,"phase":"startup","detail":"Approved Courier Python was not found; an operator must configure CHAT_COURIER_PYTHON"}
+    echo {"event":"configuration_error","ok":false,"phase":"startup","detail":"Approved Courier Python was not found; create .venv or configure CHAT_COURIER_PYTHON"}
     exit /b 2
 )
 

@@ -17,6 +17,11 @@ launcher sequence below, never a mixture of both.
 Use this repository only for the mechanical ChatGPT transport. Prepare a
 request directory, then use this exact sequence:
 
+For cross-machine handoff, `courier_quiescence` is the only Agent-facing
+readiness probe. It is read-only and must report `quiescent=true` before the
+owning project releases remote workflow ownership. Never delete queue or owner
+files merely to make this probe pass.
+
 ```text
 <courier-root>/scripts/chat-courier.cmd validate <request-dir>
 <courier-root>/scripts/chat-courier.cmd run <request-dir>
