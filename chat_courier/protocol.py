@@ -34,6 +34,14 @@ def build_prompt(request: Request) -> str:
             "Bundle locally resolvable implementation, testing, diagnosis, and recertification into that work order. "
             "Do not issue a separate diagnostic-only or corrective-only successor unless new scientific judgment, budget, or authority is required."
         )
+    if request.idle_supervision_required:
+        preferences.append(
+            "Idle-supervision mode is active for this project. In every successor work order, "
+            f"require the local worker to send a structured completion handoff to supervisor task {request.supervisor_task_id} "
+            "before ending its turn or becoming idle for any reason, including success, failure, a milestone, "
+            "WORKFLOW_TERMINATED, or no safe next action. The supervisor decides whether stopping is legitimate. "
+            "This handoff requirement does not authorize extra scientific executions or retries."
+        )
     workflow_contract = ""
     try:
         manifest = json.loads((request.directory / "request.json").read_text(encoding="utf-8-sig"))

@@ -73,6 +73,8 @@ class Request:
     attachments: tuple[Path, ...]; workflow_window_seconds: int; queue_wait_seconds: int; task_difficulty: str
     instruction_level: str; report_policy: str; chat_url: str; fingerprint: str
     retry_message: str | None = None
+    idle_supervision_required: bool = False
+    supervisor_task_id: str | None = None
 
 def registry_path() -> Path: return runtime_root() / "chat_urls.json"
 def pending_registry_path() -> Path: return runtime_root() / "pending_chat_url_registrations.json"
@@ -185,6 +187,13 @@ def load_request(directory: str | Path) -> Request:
     if detail not in {"normal", "detailed", "manual_book"}: raise ValidationError("instruction_level must be normal, detailed, or manual_book")
     report_policy = raw.get("report_policy", "per-work-order")
     if report_policy not in {"adaptive", "per-work-order", "milestone", "final-only"}: raise ValidationError("report_policy must be adaptive, per-work-order, milestone, or final-only")
+    idle_supervision_required = raw.get("idle_supervision_required", False)
+    if type(idle_supervision_required) is not bool: raise ValidationError("idle_supervision_required must be boolean")
+    supervisor_task_id = raw.get("supervisor_task_id")
+    if idle_supervision_required and (not isinstance(supervisor_task_id, str) or not IDENTIFIER.fullmatch(supervisor_task_id)):
+        raise ValidationError("supervisor_task_id is required when idle supervision is enabled")
+    if not idle_supervision_required and supervisor_task_id is not None:
+        raise ValidationError("supervisor_task_id requires idle_supervision_required=true")
     explicit_url = raw.get("chat_url")
     if explicit_url is not None and not valid_chat_url(explicit_url): raise ValidationError("chat_url must be an HTTPS ChatGPT conversation URL")
     registered_url = _load_registry().get(project_id)
@@ -196,8 +205,10 @@ def load_request(directory: str | Path) -> Request:
     # Preserve fingerprints of legacy requests that predate this optional preference.
     if "report_policy" in raw: metadata["report_policy"] = report_policy
     if retry_path: metadata["retry_message_file"] = retry_path.name
+    if "idle_supervision_required" in raw: metadata["idle_supervision_required"] = idle_supervision_required
+    if supervisor_task_id is not None: metadata["supervisor_task_id"] = supervisor_task_id
     metadata["queue_wait_seconds"] = queue_wait
     digest.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")); digest.update(message_path.read_bytes())
     if retry_path: digest.update(retry_path.read_bytes())
     for path in attachments: digest.update(path.name.encode("utf-8")); digest.update(path.read_bytes())
-    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, report_policy, chat_url, digest.hexdigest(), retry_message)
+    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, report_policy, chat_url, digest.hexdigest(), retry_message, idle_supervision_required, supervisor_task_id)

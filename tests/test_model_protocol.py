@@ -72,6 +72,24 @@ class ModelProtocolTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 self.make_request(root, report_policy="chatty")
 
+    def test_idle_supervision_is_explicit_validated_and_injected(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            plain = self.make_request(root)
+            supervised = self.make_request(
+                root,
+                idle_supervision_required=True,
+                supervisor_task_id="01a04136-7e60-75c3-88cf-156581a3733e",
+            )
+            prompt = build_prompt(supervised)
+            self.assertTrue(supervised.idle_supervision_required)
+            self.assertIn("Idle-supervision mode is active", prompt)
+            self.assertIn("before ending its turn or becoming idle for any reason", prompt)
+            self.assertIn("01a04136-7e60-75c3-88cf-156581a3733e", prompt)
+            self.assertNotEqual(plain.fingerprint, supervised.fingerprint)
+            with self.assertRaises(ValidationError):
+                self.make_request(root, idle_supervision_required=True)
+
     def test_mephc_closeout_prompt_bootstraps_machine_contract_in_a_fresh_chat(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.make_request(Path(value), flow_schema="mephc-fixed-closeout-v2")
