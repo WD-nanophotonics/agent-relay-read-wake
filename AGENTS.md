@@ -235,6 +235,13 @@ instead of inventing a diagnostic or corrective successor. Within the remote-
 verifiable boundary, `task_difficulty` and `instruction_level` remain optional
 preferences and ChatGPT retains authority over task scope and detail.
 
+For MePhC, the scope hierarchy is Project -> Goal -> Milestone/Branch -> Work
+Order -> Job/Run. Closing any scope below Project, including a `STOP_*`
+scientific branch or Goal, requires a substantive successor. ChatGPT cannot
+directly terminate the Project workflow; it requests
+`LOCAL_SUPERVISOR_REASON=PROJECT_TERMINATION_REVIEW`, and only the configured
+local supervisor may approve the terminal ledger transition.
+
 Run only targeted tests explicitly named for the current change. Do not add a
 persistent service, mailbox transport, worker scheduler, or browser runtime
 outside the single bounded ChatCourier process.
