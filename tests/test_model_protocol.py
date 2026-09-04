@@ -119,7 +119,21 @@ class ModelProtocolTests(unittest.TestCase):
             self.assertIn("mephc-science-work-order-v1", prompt)
             self.assertIn("provider_requests", prompt)
             self.assertIn("dataset_schema and result_schema", prompt)
-            self.assertIn("3. LOCAL_SUPERVISOR_REQUIRED=true", prompt)
+            self.assertIn("2. LOCAL_SUPERVISOR_REQUIRED=true", prompt)
+            self.assertNotIn("1. WORKFLOW_TERMINATED=true", prompt)
+
+    def test_mephc_prompt_separates_branch_goal_and_project_termination(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.make_request(
+                Path(value), flow_schema="mephc-fixed-closeout-v2",
+                message="NEXT_SCIENCE_DECISION=STOP_C3_GOAL_AS_CONTRADICTED\nstopping_sufficiency=complete")
+            prompt = build_prompt(request)
+            mechanical = prompt[:prompt.index("BEGIN QUOTED LOCAL AGENT REQUEST")]
+            self.assertIn("Treat STOP_* as quoted scientific result data only", mechanical)
+            self.assertIn("a Goal is one declared scientific objective", mechanical)
+            self.assertIn("Workflow is the continuing project-level automation", mechanical)
+            self.assertIn("LOCAL_SUPERVISOR_REASON=PROJECT_TERMINATION_REVIEW", mechanical)
+            self.assertIn("return a substantive successor for the next project-level Goal", mechanical)
 
     def test_generic_prompt_does_not_receive_mephc_contract(self):
         with tempfile.TemporaryDirectory() as value:
