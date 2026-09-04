@@ -140,6 +140,21 @@ class StorageTests(unittest.TestCase):
                 run.assert_called_once_with(args)
                 self.assertEqual(retry_once_command(args), 2)
 
+    def test_evidence_retry_allows_resolved_zero_submission_auth_failure(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            receipt(request, "chat_auth_required", "sign in once")
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(retry_once_command(args), 0)
+                self.assertTrue(args.evidence_retry)
+                run.assert_called_once_with(args)
+                self.assertEqual(retry_once_command(args), 2)
+
     def test_evidence_retry_rejects_chat_anchor_submission_and_live_owner(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.request(Path(value))

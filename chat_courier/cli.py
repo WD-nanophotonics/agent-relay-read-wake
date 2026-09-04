@@ -727,8 +727,15 @@ def retry_once_command(args: argparse.Namespace) -> int:
         owner_live = bool(owner and (process_alive(owner.owner_pid)
                                     or (owner.browser_pid and process_alive(owner.browser_pid))))
         forbidden = {"request_submitted", "chat_submission_unconfirmed", "submission_unconfirmed"}
-        if previous is None or previous.get("state") != "queue_recovery_required":
-            raise ValidationError("evidence retry requires queue_recovery_required")
+        # A pre-submit authentication failure is recoverable after the user
+        # signs in.  It has the same safety proof as queue recovery: a fresh
+        # read-only probe must show no matching user turn, no reply, no live
+        # owner, and the durable submission count must still be zero.
+        recoverable_unsent_states = {"queue_recovery_required", "chat_auth_required"}
+        if previous is None or previous.get("state") not in recoverable_unsent_states:
+            raise ValidationError(
+                "evidence retry requires queue recovery or a resolved pre-submit authentication failure"
+            )
         if time.time() - float(probe.get("captured_at", 0)) > 300:
             raise ValidationError("latest-response probe is stale")
         if probe.get("fingerprint") != request.fingerprint:

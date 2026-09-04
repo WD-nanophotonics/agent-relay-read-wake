@@ -117,6 +117,40 @@ class BrowserContractTests(unittest.TestCase):
             def locator(self, _): return Locator()
         self.assertTrue(ChatDom(Page()).access_denied())
 
+    def test_visible_editable_composer_outweighs_generic_login_labels(self):
+        class Element:
+            def __init__(self, *, visible=False, editable=False, text=""):
+                self.visible, self.editable, self.text = visible, editable, text
+            @property
+            def last(self): return self
+            @property
+            def first(self): return self
+            def count(self): return 1
+            def is_visible(self): return self.visible
+            def is_editable(self): return self.editable
+            def inner_text(self, **_): return self.text
+        class Page:
+            url = "https://chatgpt.com/g/project/c/conversation"
+            def locator(self, selector):
+                if selector in ChatDom.composer_selectors:
+                    return Element(visible=True, editable=True)
+                if selector == "body":
+                    return Element(text="MePhC project Continue as another account")
+                return Element(visible=True)
+        self.assertFalse(ChatDom(Page()).authentication_required())
+
+    def test_auth_url_remains_authoritative_even_if_composer_is_visible(self):
+        class Composer:
+            @property
+            def last(self): return self
+            def count(self): return 1
+            def is_visible(self): return True
+            def is_editable(self): return True
+        class Page:
+            url = "https://chatgpt.com/auth/login"
+            def locator(self, _): return Composer()
+        self.assertTrue(ChatDom(Page()).authentication_required())
+
     def test_unconfirmed_submission_keeps_a_diagnostic_reference(self):
         path = Path("submission_diagnostic.json")
         error = SubmissionUnconfirmed("unconfirmed", path)

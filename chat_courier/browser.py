@@ -153,6 +153,18 @@ class ChatDom:
             url = (self.page.url or "").lower()
             if any(part in url for part in ("/auth/login", "/auth/", "/login")):
                 return True
+            # ChatGPT can render generic account actions containing labels
+            # such as "Log in" or "Continue as" on an authenticated project
+            # conversation.  A visible, editable composer is stronger session
+            # evidence than those non-exclusive labels.  The authentication
+            # URL check above and the separate conversation-id check remain
+            # authoritative.
+            try:
+                composer = self.composer()
+                if composer.is_visible() and composer.is_editable():
+                    return False
+            except Exception:
+                pass
             for selector in self.auth_selectors:
                 locator = self.page.locator(selector)
                 if locator.count() and locator.first.is_visible():
