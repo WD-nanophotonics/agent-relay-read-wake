@@ -225,9 +225,15 @@ least `queue_wait_seconds + 600 + workflow_window_seconds + 60` seconds, and
 read `response.txt` only after the `response_received` event. Do not rerun a
 changed request directory: create a new request ID instead.
 
-ChatCourier's prompt marks Agent text as quoted reference. ChatGPT has final
-authority over task scope, difficulty, and detail. `task_difficulty` and
-`instruction_level` are optional preferences, not commands.
+ChatCourier's prompt marks Agent text as quoted reference. Its mechanical
+wrapper limits ChatGPT's authority to domain reasoning and project content
+that can be independently verified in the registered remote Git repository.
+Local workflow/runtime state, cross-repository integration, uncommitted files,
+and evidence absent or incomplete in remote Git belong to the configured local
+supervisor. ChatGPT returns `LOCAL_SUPERVISOR_REQUIRED=true` for those cases
+instead of inventing a diagnostic or corrective successor. Within the remote-
+verifiable boundary, `task_difficulty` and `instruction_level` remain optional
+preferences and ChatGPT retains authority over task scope and detail.
 
 Run only targeted tests explicitly named for the current change. Do not add a
 persistent service, mailbox transport, worker scheduler, or browser runtime
