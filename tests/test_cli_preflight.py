@@ -356,6 +356,7 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(waiting["safe_next_action"], "wait_for_same_request")
         self.assertTrue(reconnecting["rate_limited"])
         self.assertEqual(reconnecting["reconnect_attempt"], 1)
+        self.assertEqual(reconnecting["maximum_reconnect_attempts"], 1)
 
     def test_non_streaming_composer_failure_does_not_wait_or_reconnect(self):
         with tempfile.TemporaryDirectory() as value, patch(
