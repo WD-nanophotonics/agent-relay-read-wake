@@ -212,6 +212,14 @@ interrupted before Courier proves the successor URL, do not try again: inspect
 rollover with a proven successor URL only resumes that same successor; it does
 not create another Chat.
 
+An explicit current user instruction to replace an exhausted conversation may
+instead authorize `courier_rollover_target <fresh-handoff-request-dir> --basis
+user_direct`. This form accepts only a fresh request with no receipt, events,
+response, or prior submission. It still derives the Project from the registered
+source URL, creates exactly one successor inside that Project with the same
+profile, sends the handoff once, and atomically registers the proven successor.
+It must never be inferred from a generic browser or composer failure.
+
 ## Chat URL registration
 
 The registered project URL is the default and must be reused, except for the

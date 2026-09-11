@@ -167,9 +167,11 @@ def confirm_url_registration(project_id: str, confirmation_id: str, basis: str) 
         pending.pop(project_id, None); atomic_json(pending_registry_path(), pending)
         return {"project_id": project_id, "url": url, "previous_url": previous, "changed": previous != url, "basis": basis}
 
-def commit_exhausted_conversation_rollover(project_id: str, source_url: str,
-                                           successor_url: str) -> dict[str, Any]:
-    """Atomically bind a verified successor inside the source ChatGPT Project."""
+def commit_conversation_rollover(project_id: str, source_url: str,
+                                 successor_url: str, *, basis: str) -> dict[str, Any]:
+    """Atomically bind an authorized successor inside the source ChatGPT Project."""
+    if basis not in {"verified_context_capacity", "user_direct"}:
+        raise ValidationError("conversation rollover basis is invalid")
     if not IDENTIFIER.fullmatch(project_id): raise ValidationError("project_id is invalid")
     if conversation_id_from_url(source_url) is None or conversation_id_from_url(successor_url) is None:
         raise ValidationError("source and successor must be ChatGPT conversation URLs")
@@ -182,7 +184,7 @@ def commit_exhausted_conversation_rollover(project_id: str, source_url: str,
         if current == successor_url:
             return {"project_id": project_id, "url": successor_url,
                     "previous_url": source_url, "changed": False,
-                    "basis": "verified_context_capacity"}
+                    "basis": basis}
         if current != source_url:
             raise ValidationError("project registration changed during conversation rollover")
         registry[project_id] = successor_url
@@ -193,7 +195,14 @@ def commit_exhausted_conversation_rollover(project_id: str, source_url: str,
             atomic_json(pending_registry_path(), pending)
         return {"project_id": project_id, "url": successor_url,
                 "previous_url": source_url, "changed": True,
-                "basis": "verified_context_capacity"}
+                "basis": basis}
+
+def commit_exhausted_conversation_rollover(project_id: str, source_url: str,
+                                           successor_url: str) -> dict[str, Any]:
+    """Atomically bind a successor after a verified capacity response."""
+    return commit_conversation_rollover(
+        project_id, source_url, successor_url, basis="verified_context_capacity",
+    )
 
 def load_request(directory: str | Path) -> Request:
     root = Path(directory).resolve(); manifest = root / "request.json"; _regular_file(manifest, "request.json")

@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from chat_courier.model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, DEFAULT_QUEUE_WAIT_SECONDS, DEFAULT_WINDOW_SECONDS, ValidationError, chat_project_id_from_url, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, project_landing_url, propose_url_registration, same_chat_project
+from chat_courier.model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, DEFAULT_QUEUE_WAIT_SECONDS, DEFAULT_WINDOW_SECONDS, ValidationError, chat_project_id_from_url, commit_conversation_rollover, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, project_landing_url, propose_url_registration, same_chat_project
 from chat_courier.protocol import BEGIN_RESPONSE, END_RESPONSE, REPLY_PROTOCOL, build_prompt, is_conversation_exhausted, parse_reply
 
 
@@ -44,6 +44,21 @@ class ModelProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "source ChatGPT Project"):
                 commit_exhausted_conversation_rollover(
                     "P", target, "https://chatgpt.com/g/g-p-other/c/new")
+
+    def test_user_direct_rollover_stays_inside_project_and_records_basis(self):
+        with tempfile.TemporaryDirectory() as value, \
+                patch("chat_courier.model.runtime_root", return_value=Path(value)):
+            source = "https://chatgpt.com/g/g-p-project/c/old"
+            target = "https://chatgpt.com/g/g-p-project/c/new"
+            (Path(value) / "chat_urls.json").write_text(
+                json.dumps({"P": source}), encoding="utf-8")
+            result = commit_conversation_rollover(
+                "P", source, target, basis="user_direct")
+            self.assertTrue(result["changed"])
+            self.assertEqual(result["basis"], "user_direct")
+            with self.assertRaisesRegex(ValidationError, "basis"):
+                commit_conversation_rollover(
+                    "P", target, source, basis="memory_guess")
 
     def make_request(self, root: Path, **changes):
         message = changes.pop("message", "Please prepare the next task.")

@@ -11,7 +11,7 @@ import time
 
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
-from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root
+from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
@@ -859,6 +859,8 @@ def rollover_target_command(args: argparse.Namespace) -> int:
     """Create one same-Project successor after Chat proves the source is exhausted."""
     root = Path(args.request_directory).resolve()
     intent_path = root / "target-rollover.json"
+    basis = getattr(args, "basis", "verified_context_capacity")
+    user_direct = basis == "user_direct"
     try:
         if intent_path.exists():
             intent = json.loads(intent_path.read_text(encoding="utf-8"))
@@ -871,7 +873,9 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 )
             request = load_request(root)
             response_path = root / "response.txt"
-            exhausted_again = (request.chat_url == target_url and response_path.is_file()
+            intent_basis = intent.get("basis", "verified_context_capacity")
+            exhausted_again = (intent_basis == "verified_context_capacity"
+                               and request.chat_url == target_url and response_path.is_file()
                                and is_conversation_exhausted(
                                    response_path.read_text(encoding="utf-8-sig")))
             if exhausted_again:
@@ -880,8 +884,9 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                     raise ValidationError("prior rollover archive is missing")
                 os.replace(intent_path, prior_archive / "target-rollover.json")
             else:
-                commit_exhausted_conversation_rollover(
+                commit_conversation_rollover(
                     intent["project_id"], intent["source_url"], target_url,
+                    basis=intent_basis,
                 )
                 request = load_request(root)
                 baseline = intent.get("assistant_identities")
@@ -891,7 +896,8 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 if submission_count(request) == 0:
                     event(request, "target_rollover_authorized", phase="target_rollover",
                           source_url=intent["source_url"], successor_url=target_url,
-                          archive_directory=intent["archive_directory"])
+                          archive_directory=intent.get("archive_directory"),
+                          basis=intent_basis)
                     event(request, "request_submitted", phase="submit", submission_attempt=1,
                           target_rollover=True)
                     receipt(request, "waiting_for_response",
@@ -900,17 +906,26 @@ def rollover_target_command(args: argparse.Namespace) -> int:
 
         request = load_request(args.request_directory)
         response_path = request.directory / "response.txt"
-        if not response_path.is_file() or not is_conversation_exhausted(
-            response_path.read_text(encoding="utf-8-sig")
-        ):
-            raise ValidationError("the prior target is not proven conversation-exhausted")
-        prior = json.loads((request.directory / "receipt.json").read_text(encoding="utf-8"))
-        if (not isinstance(prior, dict) or prior.get("project_id") != request.project_id
-                or prior.get("request_id") != request.request_id
-                or prior.get("fingerprint") != request.fingerprint
-                or prior.get("state") != "response_received"):
-            raise ValidationError("the exhausted response is not bound to the active target")
-        prior_count = submission_count(request, total=True)
+        if user_direct:
+            if (response_path.exists() or (request.directory / "receipt.json").exists()
+                    or request_events(request) or submission_count(request, total=True)):
+                raise ValidationError(
+                    "user-direct rollover requires a fresh unsubmitted handoff request"
+                )
+            prior = None
+            prior_count = 0
+        else:
+            if not response_path.is_file() or not is_conversation_exhausted(
+                response_path.read_text(encoding="utf-8-sig")
+            ):
+                raise ValidationError("the prior target is not proven conversation-exhausted")
+            prior = json.loads((request.directory / "receipt.json").read_text(encoding="utf-8"))
+            if (not isinstance(prior, dict) or prior.get("project_id") != request.project_id
+                    or prior.get("request_id") != request.request_id
+                    or prior.get("fingerprint") != request.fingerprint
+                    or prior.get("state") != "response_received"):
+                raise ValidationError("the exhausted response is not bound to the active target")
+            prior_count = submission_count(request, total=True)
         source_url = request.chat_url
         queue, terminal = _wait_for_queue(request, None)
         if terminal is not None:
@@ -919,15 +934,17 @@ def rollover_target_command(args: argparse.Namespace) -> int:
         try:
             with ChatSession(request, status_callback=lambda name, **values: _upload_status(request, name, **values)) as session:
                 session.prepare_successor_project_chat()
-                archive = archive_target_generation(request)
-                # _wait_for_queue wrote an active queue receipt. Preserve the
-                # original terminal receipt as the archived generation proof.
-                atomic_json(archive / "receipt.json", prior)
+                archive = archive_target_generation(request) if prior is not None else None
+                if archive is not None:
+                    # _wait_for_queue wrote an active queue receipt. Preserve the
+                    # original terminal receipt as the archived generation proof.
+                    atomic_json(archive / "receipt.json", prior)
                 atomic_json(intent_path, {
                     "version": 1, "phase": "prepared", "project_id": request.project_id,
                     "request_id": request.request_id, "source_url": source_url,
                     "source_fingerprint": request.fingerprint,
-                    "archive_directory": archive.name,
+                    "archive_directory": archive.name if archive is not None else None,
+                    "basis": basis,
                     "prior_total_submission_count": prior_count,
                 })
                 baseline = session.submit(build_prompt(request), request.attachments)
@@ -937,11 +954,14 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                     "request_id": request.request_id, "source_url": source_url,
                     "source_fingerprint": request.fingerprint,
                     "successor_url": successor_url,
-                    "archive_directory": archive.name,
+                    "archive_directory": archive.name if archive is not None else None,
+                    "basis": basis,
                     "prior_total_submission_count": prior_count,
                     "assistant_identities": sorted(baseline),
                 })
-                commit_exhausted_conversation_rollover(request.project_id, source_url, successor_url)
+                commit_conversation_rollover(
+                    request.project_id, source_url, successor_url, basis=basis,
+                )
                 active_request = load_request(args.request_directory)
                 save_response_cursor(active_request, baseline)
                 event(active_request, "target_rollover_authorized", phase="target_rollover",
@@ -949,7 +969,8 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                       prior_fingerprint=request.fingerprint,
                       active_fingerprint=active_request.fingerprint,
                       source_url=source_url, successor_url=successor_url,
-                      archive_directory=archive.name)
+                      archive_directory=archive.name if archive is not None else None,
+                      basis=basis)
                 event(active_request, "request_submitted", phase="submit", submission_attempt=1,
                       target_rollover=True)
                 receipt(active_request, "waiting_for_response",
@@ -1161,8 +1182,11 @@ def main(argv: list[str] | None = None) -> int:
     resend_once.add_argument("request_directory"); resend_once.set_defaults(handler=resend_once_command)
     retry_once = sub.add_parser("courier_retry_once", help="retry one apparently unsent immutable request after read-only proof")
     retry_once.add_argument("request_directory"); retry_once.set_defaults(handler=retry_once_command)
-    rollover = sub.add_parser("courier_rollover_target", help="send an exhausted request to a newly confirmed target")
-    rollover.add_argument("request_directory"); rollover.set_defaults(handler=rollover_target_command)
+    rollover = sub.add_parser("courier_rollover_target", help="send an authorized handoff request to a same-Project successor")
+    rollover.add_argument("request_directory")
+    rollover.add_argument("--basis", choices=["verified_context_capacity", "user_direct"],
+                          default="verified_context_capacity")
+    rollover.set_defaults(handler=rollover_target_command)
     capture_latest = sub.add_parser("courier_capture_latest", help="capture the latest completed assistant reply without sending")
     capture_latest.add_argument("request_directory"); capture_latest.set_defaults(handler=capture_latest_command)
     args = parser.parse_args(argv)
