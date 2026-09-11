@@ -85,7 +85,8 @@ If that check fails, preflight emits `chat_composer_not_ready` with a local UI
 snapshot instead of allowing a later `Locator.fill()` timeout. The Agent must
 not create a replacement Chat conversation to work around that event.
 
-During a normal `run`, a visible streaming indicator is treated as temporary
+During a normal `run`, a visible streaming indicator, or a visible, enabled,
+editable composer whose focus is temporarily contended, is treated as temporary
 shared-Chat contention rather than a transport failure. Courier emits the
 successful `chat_busy_waiting` state, records that no Agent action is required,
 holds the same immutable request for 600 seconds, and then reconnects exactly

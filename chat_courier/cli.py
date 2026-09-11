@@ -351,7 +351,7 @@ def _write_not_ready_diagnostic(request, exc: ChatComposerNotReady) -> str:
 
 
 def _chat_contention_snapshot(exc: Exception) -> dict[str, object] | None:
-    """Return the UI sample only when Chat is visibly generating a turn."""
+    """Return a sample only for positive streaming or composer-focus contention."""
     if isinstance(exc, ChatComposerNotReady):
         snapshots = [exc.snapshot]
     elif isinstance(exc, PreSubmissionError) and exc.failure_stage == "composer_not_ready":
@@ -359,16 +359,32 @@ def _chat_contention_snapshot(exc: Exception) -> dict[str, object] | None:
     else:
         return None
     for snapshot in snapshots:
-        if isinstance(snapshot, dict) and snapshot.get("streaming") is True:
+        if not isinstance(snapshot, dict):
+            continue
+        if snapshot.get("streaming") is True:
+            return snapshot
+        if (
+            snapshot.get("visible") is True
+            and snapshot.get("enabled") is True
+            and snapshot.get("editable") is True
+            and snapshot.get("streaming") is False
+            and snapshot.get("focused") is False
+            and snapshot.get("ready") is False
+        ):
             return snapshot
     return None
 
 
 def _wait_for_shared_chat(request, exc: Exception) -> None:
     snapshot = _chat_contention_snapshot(exc) or {}
+    contention_reason = (
+        "shared_chat_streaming"
+        if snapshot.get("streaming") is True
+        else "shared_chat_focus_contended"
+    )
     wait_started_at = time.time()
     values = {
-        "contention_reason": "shared_chat_streaming",
+        "contention_reason": contention_reason,
         "wait_seconds": CHAT_CONTENTION_WAIT_SECONDS,
         "wait_started_at": wait_started_at,
         "wait_deadline_at": wait_started_at + CHAT_CONTENTION_WAIT_SECONDS,
@@ -394,7 +410,7 @@ def _wait_for_shared_chat(request, exc: Exception) -> None:
     )
     time.sleep(CHAT_CONTENTION_WAIT_SECONDS)
     reconnect_values = {
-        "contention_reason": "shared_chat_streaming",
+        "contention_reason": contention_reason,
         "runner_pid": os.getpid(),
         "reconnect_attempt": 1,
         "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,

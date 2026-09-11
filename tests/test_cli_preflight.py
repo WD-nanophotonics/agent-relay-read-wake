@@ -356,6 +356,40 @@ class CliPreflightTests(unittest.TestCase):
         sleep.assert_called_once_with(600)
         self.assertEqual(final["event"], "submission_not_started")
 
+    def test_editable_composer_with_contended_focus_uses_bounded_wait(self):
+        calls = []
+
+        def run_once(*_args, **_kwargs):
+            calls.append("connect")
+            if len(calls) == 1:
+                raise ChatComposerNotReady(
+                    "composer focus contended",
+                    {
+                        "visible": True, "enabled": True, "editable": True,
+                        "streaming": False, "focused": False, "ready": False,
+                    },
+                )
+            return "response_timeout"
+
+        with tempfile.TemporaryDirectory() as value, patch(
+            "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+        ), patch("chat_courier.cli._run_session_once", side_effect=run_once), patch(
+            "chat_courier.cli.time.sleep"
+        ) as sleep:
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = _run_after_queue(request, None)
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["connect", "connect"])
+        sleep.assert_called_once_with(600)
+        waiting = next(item for item in events if item["event"] == "chat_busy_waiting")
+        self.assertEqual(waiting["contention_reason"], "shared_chat_focus_contended")
+        self.assertFalse(waiting["agent_action_required"])
+
     def test_queue_timeout_does_not_construct_a_browser_session(self):
         class Queue:
             def __init__(self, request): pass
