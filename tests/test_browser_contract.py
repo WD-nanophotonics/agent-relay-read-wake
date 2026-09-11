@@ -133,6 +133,27 @@ class BrowserContractTests(unittest.TestCase):
         self.assertEqual(conversation_id_from_url("https://chatgpt.com/g/g-project/c/conversation-2"), "conversation-2")
         self.assertIsNone(conversation_id_from_url("https://chatgpt.com/"))
 
+    def test_rollover_recovery_finds_unique_successor_by_request_marker(self):
+        source = "https://chatgpt.com/g/g-project/c/old"
+        successor = "https://chatgpt.com/g/g-project/c/new"
+
+        class Locator:
+            def __init__(self, page, selector): self.page, self.selector = page, selector
+            def evaluate_all(self, _script): return [successor] if self.selector == "a[href]" else []
+            def all_inner_texts(self):
+                return ["REQUEST_ID=P-1"] if self.page.url == successor else []
+
+        class Page:
+            def __init__(self): self.url = source
+            def goto(self, url, **_kwargs): self.url = url
+            def wait_for_timeout(self, _milliseconds): pass
+            def locator(self, selector): return Locator(self, selector)
+
+        session = object.__new__(ChatSession)
+        session.page = Page()
+        session.request = type("Request", (), {"chat_url": source})()
+        self.assertEqual(session.recover_successor_url("P-1"), successor)
+
     def test_access_denied_text_is_detected_before_composer_use(self):
         class Locator:
             def inner_text(self, **_): return "You don't have access to this conversation"

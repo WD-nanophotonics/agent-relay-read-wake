@@ -586,10 +586,12 @@ class ChatDom:
 class ChatSession:
     """One owned browser process, page, and Playwright connection per run."""
     def __init__(self, request: Request, *, recovery: bool = False, prepare_only: bool = False,
+                 inspect_project: bool = False,
                  status_callback: Callable[..., None] | None = None):
         self.request = request; self.process: subprocess.Popen | None = None
         self.recovery = recovery
         self.prepare_only = prepare_only
+        self.inspect_project = inspect_project
         self.status_callback = status_callback
         self.attached_existing = False
         configured = os.environ.get("CHAT_COURIER_PROFILE") or os.environ.get("AGENT_RELAY_CHATGPT_PROFILE")
@@ -670,6 +672,8 @@ class ChatSession:
         try:
             self._connect(port, existing=False)
             self.owner.update("browser_ready", cdp_port=port, browser_pid=self.process.pid if self.process else None)
+            if self.inspect_project:
+                return self
             dom = ChatDom(self.page)
             dom.wait_for_composer()
             if not self.prepare_only and not self.recovery:
@@ -711,6 +715,48 @@ class ChatSession:
         raise SubmissionUnconfirmed(
             "the first successor turn was confirmed but its same-Project conversation URL was not established"
         )
+
+    def recover_successor_url(self, marker: str, timeout_seconds: float = 60.0) -> str:
+        """Find one already-created successor by its unique outbound marker, without sending."""
+        if self.page is None:
+            raise BrowserError("browser session is not open")
+        landing = project_landing_url(self.request.chat_url)
+        source_project = chat_project_id_from_url(self.request.chat_url)
+        if landing is None or source_project is None:
+            raise BrowserError("registered target is not a ChatGPT Project conversation")
+        deadline = time.monotonic() + timeout_seconds
+        checked: set[str] = set()
+        matches: set[str] = set()
+        while time.monotonic() < deadline:
+            self.page.goto(landing, wait_until="domcontentloaded", timeout=120000)
+            if chat_project_id_from_url(self.page.url) != source_project:
+                raise ChatConversationMismatch(
+                    "ChatGPT navigation left the registered Project during rollover recovery"
+                )
+            self.page.wait_for_timeout(1000)
+            hrefs = self.page.locator("a[href]").evaluate_all(
+                "nodes => nodes.map(node => node.href).filter(Boolean)"
+            )
+            candidates = []
+            for href in hrefs:
+                if (not isinstance(href, str) or href in checked
+                        or not same_chat_project(self.request.chat_url, href)
+                        or conversation_id_from_url(href) == conversation_id_from_url(self.request.chat_url)):
+                    continue
+                candidates.append(href.split("?", 1)[0].split("#", 1)[0])
+            for candidate in dict.fromkeys(candidates):
+                checked.add(candidate)
+                self.page.goto(candidate, wait_until="domcontentloaded", timeout=120000)
+                self.page.wait_for_timeout(1000)
+                user_turns = self.page.locator(ChatDom.user_selector).all_inner_texts()
+                if any(marker in text for text in user_turns):
+                    matches.add(candidate)
+            if len(matches) == 1:
+                return next(iter(matches))
+            if len(matches) > 1:
+                raise BrowserError("multiple same-Project successor chats contain the request marker")
+            self.page.wait_for_timeout(1000)
+        raise BrowserError("the confirmed successor chat was not found by its request marker")
 
     def submit(self, text: str, files: tuple[Path, ...] = (), *, marker: str | None = None,
                include_empty_baseline: bool = False) -> set[str]:

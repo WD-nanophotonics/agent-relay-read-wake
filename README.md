@@ -57,6 +57,9 @@ the same command accepts either a fresh request or exactly one confirmed
 pending submission with no reply, using `--basis user_direct`. The successor
 remains constrained to the same ChatGPT Project and dedicated profile, and is
 registered only after its URL is proven.
+If ChatGPT confirms the first turn before exposing the final URL, the same
+rollover command recovers by locating that unique request marker in the source
+Project. This recovery is read-only and does not submit again.
 
 Prepare a request directory containing `request.json`, `message.txt`, and any
 explicitly listed files under `attachments/`. Agents must use the bundled

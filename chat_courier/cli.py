@@ -868,9 +868,27 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 raise ValidationError("invalid target-rollover.json")
             target_url = intent.get("successor_url")
             if not isinstance(target_url, str):
-                raise ValidationError(
-                    "a prior rollover stopped before a successor URL was proven; manual inspection is required"
-                )
+                request = load_request(root)
+                previous = load_receipt(request)
+                queue, terminal = _wait_for_queue(request, previous)
+                if terminal is not None:
+                    return terminal
+                assert queue is not None
+                try:
+                    with ChatSession(request, inspect_project=True) as session:
+                        target_url = session.recover_successor_url(request.request_id)
+                finally:
+                    queue.complete()
+                baseline = load_response_cursor(request)
+                if baseline is None:
+                    raise ValidationError("rollover recovery is missing its response cursor")
+                intent = {
+                    **intent,
+                    "phase": "submitted",
+                    "successor_url": target_url,
+                    "assistant_identities": sorted(baseline),
+                }
+                atomic_json(intent_path, intent)
             request = load_request(root)
             response_path = root / "response.txt"
             intent_basis = intent.get("basis", "verified_context_capacity")

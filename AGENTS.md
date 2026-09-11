@@ -220,6 +220,9 @@ the same immutable request is sent once in the successor. It still derives the
 Project from the registered source URL, creates exactly one successor inside
 that Project with the same profile, and atomically registers the proven
 successor. It must never be inferred from a generic browser or composer failure.
+If the first successor turn is confirmed before its URL is observed, rerunning
+the same rollover performs a read-only same-Project search for the unique
+request marker and registers that chat; it never sends the turn again.
 
 ## Chat URL registration
 
