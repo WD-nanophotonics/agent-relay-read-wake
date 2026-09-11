@@ -121,7 +121,8 @@ authorization to edit either message after submission.
 | `submission_not_started` | Read `receipt.json` and `transport_diagnostic.json`. No Send occurred; after the browser condition is resolved, the same unchanged directory may be run again. Decide any alternative evidence strategy outside Courier. |
 | `chat_submission_unconfirmed` | Treat external Send as uncertain. Do not resend or create another request ID; rerun the same unchanged directory only for Courier's read-only recovery. |
 | `response_timeout` or `response_protocol_error` | Send was already confirmed. Search/read first; a project bridge may then use its single bounded resend with the pre-registered immutable retry message. |
-| `chat_composer_not_ready` | The page is visible but cannot safely accept text. Report the snapshot; do not infer conversation exhaustion or create a replacement Chat. |
+| `chat_busy_waiting` or `chat_busy_reconnecting` | The same registered Chat is visibly generating another turn. Courier is handling a bounded 10-minute wait and one reconnect with the same immutable request. This is healthy progress: do not retry, replace, or escalate it. |
+| `chat_composer_not_ready` | The page is visible but cannot safely accept text and was not positively identified as active generation. Report the snapshot; do not infer conversation exhaustion or create a replacement Chat. |
 | `chat_auth_required`, `chat_access_denied`, `chat_target_mismatch`, `configuration_error`, or `browser_error` before submission | Stop and report the structured event. Do not change profile variables, create a new Chat, or route around Courier. |
 
 `preflight` is an optional human diagnostic, not part of the Agent workflow.

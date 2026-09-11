@@ -85,6 +85,14 @@ If that check fails, preflight emits `chat_composer_not_ready` with a local UI
 snapshot instead of allowing a later `Locator.fill()` timeout. The Agent must
 not create a replacement Chat conversation to work around that event.
 
+During a normal `run`, a visible streaming indicator is treated as temporary
+shared-Chat contention rather than a transport failure. Courier emits the
+successful `chat_busy_waiting` state, records that no Agent action is required,
+holds the same immutable request for 600 seconds, and then reconnects exactly
+once. It emits `chat_busy_reconnecting` before that attempt. The Agent must not
+retry, replace, or escalate the request while Courier reports this bounded
+wait. Other composer failures retain the existing fail-closed behavior.
+
 Courier also checks that Chrome's final URL has the exact registered ChatGPT
 conversation ID. A redirect to the ChatGPT home/new-chat page produces
 `chat_target_mismatch`, while a visible “You don't have access” page produces

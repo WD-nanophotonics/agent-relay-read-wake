@@ -26,6 +26,8 @@ from .workflow import (
 
 
 COURIER_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+CHAT_CONTENTION_WAIT_SECONDS = 600
+CHAT_CONTENTION_RECONNECT_ATTEMPTS = 1
 _BUILD_COMPONENTS = (
     "cli.py", "browser.py", "model.py", "protocol.py", "queue.py",
     "owner.py", "liveness.py", "storage.py", "workflow.py",
@@ -348,6 +350,65 @@ def _write_not_ready_diagnostic(request, exc: ChatComposerNotReady) -> str:
     return str(path)
 
 
+def _chat_contention_snapshot(exc: Exception) -> dict[str, object] | None:
+    """Return the UI sample only when Chat is visibly generating a turn."""
+    if isinstance(exc, ChatComposerNotReady):
+        snapshots = [exc.snapshot]
+    elif isinstance(exc, PreSubmissionError) and exc.failure_stage == "composer_not_ready":
+        snapshots = list(reversed(exc.timeline))
+    else:
+        return None
+    for snapshot in snapshots:
+        if isinstance(snapshot, dict) and snapshot.get("streaming") is True:
+            return snapshot
+    return None
+
+
+def _wait_for_shared_chat(request, exc: Exception) -> None:
+    snapshot = _chat_contention_snapshot(exc) or {}
+    values = {
+        "contention_reason": "shared_chat_streaming",
+        "wait_seconds": CHAT_CONTENTION_WAIT_SECONDS,
+        "reconnect_attempt": 1,
+        "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,
+        "agent_action_required": False,
+        "safe_next_action": "wait_for_same_request",
+        "same_request_preserved": True,
+        "composer_snapshot": snapshot,
+    }
+    detail = (
+        "The registered Chat is currently generating another turn. Courier will wait "
+        f"up to {CHAT_CONTENTION_WAIT_SECONDS // 60} minutes and reconnect once; "
+        "the Agent must not retry, replace, or escalate this request while Courier is waiting."
+    )
+    receipt(request, "chat_busy_waiting", detail, **values)
+    event(request, "chat_busy_waiting", phase="contention_wait", detail=detail, **values)
+    emit(
+        "chat_busy_waiting", ok=True, phase="contention_wait",
+        project_id=request.project_id, request_id=request.request_id,
+        detail=detail, **values,
+    )
+    time.sleep(CHAT_CONTENTION_WAIT_SECONDS)
+    reconnect_values = {
+        "contention_reason": "shared_chat_streaming",
+        "reconnect_attempt": 1,
+        "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,
+        "agent_action_required": False,
+        "same_request_preserved": True,
+    }
+    receipt(
+        request, "chat_busy_reconnecting",
+        "The bounded contention wait completed; Courier is reconnecting once with the same immutable request.",
+        **reconnect_values,
+    )
+    event(request, "chat_busy_reconnecting", phase="contention_wait", **reconnect_values)
+    emit(
+        "chat_busy_reconnecting", ok=True, phase="contention_wait",
+        project_id=request.project_id, request_id=request.request_id,
+        **reconnect_values,
+    )
+
+
 def _run_after_queue(request, previous: dict | None, *, resend_once: bool = False) -> int:
     event(request, "request_validated", phase="validate")
     emit("request_validated", ok=True, phase="validate", project_id=request.project_id, request_id=request.request_id, workflow_window_seconds=request.workflow_window_seconds, workflow_window_scope="post_submission_response", queue_wait_seconds=request.queue_wait_seconds, active_setup_budget_seconds=ACTIVE_SETUP_BUDGET_SECONDS, minimum_caller_window_seconds=minimum_caller_window_seconds(request.queue_wait_seconds, request.workflow_window_seconds))
@@ -361,11 +422,18 @@ def _run_after_queue(request, previous: dict | None, *, resend_once: bool = Fals
         event(request, "submission_intent_written", phase="submit")
     try:
         if load_response_capture(request) is None:
+            contention_reconnects = 0
             while True:
                 try:
                     outcome = _run_session_once(request, submitted, request.workflow_window_seconds,
                                                 resend_once=resend_once)
                     break
+                except (ChatComposerNotReady, PreSubmissionError) as exc:
+                    if (_chat_contention_snapshot(exc) is None
+                            or contention_reconnects >= CHAT_CONTENTION_RECONNECT_ATTEMPTS):
+                        raise
+                    contention_reconnects += 1
+                    _wait_for_shared_chat(request, exc)
                 except OwnerBusy as exc:
                     if not submitted:
                         raise BrowserError(str(exc)) from exc

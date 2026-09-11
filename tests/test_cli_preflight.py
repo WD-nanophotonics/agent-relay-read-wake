@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, PreSubmissionError
-from chat_courier.cli import _capture_response, _parse_captured_response, _run_session_once, main
+from chat_courier.cli import _capture_response, _parse_captured_response, _run_after_queue, _run_session_once, main
 from chat_courier.model import ValidationError, load_request
 from chat_courier.owner import OwnerRecord
 from chat_courier.queue import QueueStatus
@@ -276,6 +276,85 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(receipt["failure_stage"], "attachment_upload_stalled")
         self.assertEqual(receipt["next_action"], "agent_decision_required")
         self.assertTrue(receipt["safe_to_retry_same_request"])
+
+    def test_streaming_chat_waits_ten_minutes_and_reconnects_once(self):
+        calls = []
+
+        def run_once(*_args, **_kwargs):
+            calls.append("connect")
+            if len(calls) == 1:
+                raise ChatComposerNotReady(
+                    "composer busy",
+                    {"visible": True, "editable": True, "streaming": True, "ready": False},
+                )
+            return "response_timeout"
+
+        with tempfile.TemporaryDirectory() as value, patch(
+            "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+        ), patch("chat_courier.cli._run_session_once", side_effect=run_once), patch(
+            "chat_courier.cli.time.sleep"
+        ) as sleep:
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = _run_after_queue(request, None)
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["connect", "connect"])
+        sleep.assert_called_once_with(600)
+        waiting = next(item for item in events if item["event"] == "chat_busy_waiting")
+        reconnecting = next(item for item in events if item["event"] == "chat_busy_reconnecting")
+        self.assertTrue(waiting["ok"])
+        self.assertEqual(waiting["wait_seconds"], 600)
+        self.assertFalse(waiting["agent_action_required"])
+        self.assertEqual(waiting["safe_next_action"], "wait_for_same_request")
+        self.assertEqual(reconnecting["reconnect_attempt"], 1)
+        self.assertTrue(reconnecting["same_request_preserved"])
+
+    def test_non_streaming_composer_failure_does_not_wait_or_reconnect(self):
+        with tempfile.TemporaryDirectory() as value, patch(
+            "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+        ), patch(
+            "chat_courier.cli._run_session_once",
+            side_effect=ChatComposerNotReady(
+                "composer missing", {"streaming": False, "ready": False}
+            ),
+        ) as run_once, patch("chat_courier.cli.time.sleep") as sleep:
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = _run_after_queue(request, None)
+            final = json.loads(output.getvalue().splitlines()[-1])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(run_once.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(final["event"], "submission_not_started")
+
+    def test_streaming_chat_never_reconnects_more_than_once(self):
+        busy = ChatComposerNotReady(
+            "composer busy",
+            {"visible": True, "editable": True, "streaming": True, "ready": False},
+        )
+        with tempfile.TemporaryDirectory() as value, patch(
+            "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+        ), patch("chat_courier.cli._run_session_once", side_effect=[busy, busy]) as run_once, patch(
+            "chat_courier.cli.time.sleep"
+        ) as sleep:
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = _run_after_queue(request, None)
+            final = json.loads(output.getvalue().splitlines()[-1])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(run_once.call_count, 2)
+        sleep.assert_called_once_with(600)
+        self.assertEqual(final["event"], "submission_not_started")
 
     def test_queue_timeout_does_not_construct_a_browser_session(self):
         class Queue:
