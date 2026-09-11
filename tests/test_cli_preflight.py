@@ -9,13 +9,21 @@ import unittest
 from unittest.mock import patch
 
 from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, PreSubmissionError
-from chat_courier.cli import _capture_response, _parse_captured_response, _run_after_queue, _run_session_once, main
+from chat_courier.cli import _capture_response, _parse_captured_response, _run_after_queue, _run_session_once, emit, main
 from chat_courier.model import ValidationError, load_request
 from chat_courier.owner import OwnerRecord
 from chat_courier.queue import QueueStatus
 
 
 class CliPreflightTests(unittest.TestCase):
+    def test_emit_survives_legacy_windows_code_page(self):
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="cp1252", write_through=True)
+        with contextlib.redirect_stdout(stream):
+            emit("chat_busy_waiting", ok=True, page_title="审核终局阻塞")
+        payload = json.loads(raw.getvalue().decode("cp1252"))
+        self.assertEqual(payload["page_title"], "审核终局阻塞")
+
     def request_directory(self, root: Path) -> Path:
         (root / "message.txt").write_text("message", encoding="utf-8")
         (root / "request.json").write_text(json.dumps({

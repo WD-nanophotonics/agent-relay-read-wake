@@ -54,7 +54,10 @@ COURIER_BUILD_ID = _source_build_id()
 
 
 def emit(name: str, *, ok: bool, **values) -> None:
-    print(json.dumps({"event": name, "ok": ok, "courier_source_root": str(COURIER_SOURCE_ROOT), "courier_build_id": COURIER_BUILD_ID, **values}, ensure_ascii=False, sort_keys=True), flush=True)
+    # The launcher can inherit a legacy Windows code page even though Courier
+    # payloads and files are UTF-8. JSON escaping keeps diagnostic output
+    # lossless and prevents a non-ASCII page title from aborting transport.
+    print(json.dumps({"event": name, "ok": ok, "courier_source_root": str(COURIER_SOURCE_ROOT), "courier_build_id": COURIER_BUILD_ID, **values}, ensure_ascii=True, sort_keys=True), flush=True)
 
 
 def _queue_fields(status: QueueStatus) -> dict[str, object]:
