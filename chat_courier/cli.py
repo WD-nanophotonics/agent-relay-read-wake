@@ -11,7 +11,7 @@ import time
 
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
-from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root
+from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root, same_chat_project
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
@@ -809,7 +809,6 @@ def retry_once_command(args: argparse.Namespace) -> int:
     """Retry one apparently unsent immutable request after a fresh read-only probe."""
     try:
         request = load_request(args.request_directory)
-        previous = load_receipt(request)
         probe = load_latest_probe(request)
         events = request_events(request)
         owner = read_owner()
@@ -823,10 +822,6 @@ def retry_once_command(args: argparse.Namespace) -> int:
         recoverable_unsent_states = {
             "queue_recovery_required", "chat_auth_required", "submission_not_started",
         }
-        if previous is None or previous.get("state") not in recoverable_unsent_states:
-            raise ValidationError(
-                "evidence retry requires queue recovery or a resolved pre-submit authentication failure"
-            )
         if time.time() - float(probe.get("captured_at", 0)) > 300:
             raise ValidationError("latest-response probe is stale")
         if probe.get("fingerprint") != request.fingerprint:
@@ -835,7 +830,54 @@ def retry_once_command(args: argparse.Namespace) -> int:
             raise ValidationError("Chat already contains this request or its reply")
         if probe.get("live_owner_found") or owner_live:
             raise ValidationError("a live Courier or browser owner still exists")
-        if submission_count(request) or any(value.get("event") in forbidden for value in events):
+        try:
+            previous = load_receipt(request)
+        except ValidationError as original:
+            intent_path = request.directory / "target-rollover.json"
+            try:
+                intent = json.loads(intent_path.read_text(encoding="utf-8"))
+                old_receipt = json.loads((request.directory / "receipt.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise original from exc
+            if (not isinstance(intent, dict) or intent.get("version") != 1
+                    or intent.get("basis") != "user_direct" or intent.get("phase") != "prepared"
+                    or intent.get("project_id") != request.project_id
+                    or intent.get("request_id") != request.request_id
+                    or old_receipt.get("fingerprint") != intent.get("source_fingerprint")
+                    or request.chat_url == intent.get("source_url")
+                    or not same_chat_project(intent.get("source_url"), request.chat_url)
+                    or submission_count(request, total=True) != intent.get("prior_total_submission_count")):
+                raise original
+            archive = request.directory / str(intent.get("archive_directory", ""))
+            if not archive.is_dir():
+                raise ValidationError("rollover archive is missing")
+            cursor = request.directory / "response-cursor.json"
+            if cursor.exists():
+                os.replace(cursor, archive / "unresolved-successor-response-cursor.json")
+            os.replace(intent_path, archive / "target-rollover-prepared.json")
+            event(request, "target_rollover_authorized", phase="target_rollover",
+                  prior_total_submission_count=intent["prior_total_submission_count"],
+                  prior_fingerprint=intent["source_fingerprint"],
+                  active_fingerprint=request.fingerprint,
+                  source_url=intent["source_url"], successor_url=request.chat_url,
+                  archive_directory=archive.name, basis="user_direct",
+                  manual_successor=True, unresolved_confirmed_successor=True)
+            receipt(request, "queue_recovery_required",
+                    "User-confirmed same-Project successor is empty and ready for one evidence-bound retry",
+                    successor_url=request.chat_url)
+            previous = load_receipt(request)
+            events = request_events(request)
+        if previous is None or previous.get("state") not in recoverable_unsent_states:
+            raise ValidationError(
+                "evidence retry requires queue recovery or a resolved pre-submit authentication failure"
+            )
+        last_rollover = max(
+            (index for index, value in enumerate(events)
+             if value.get("event") == "target_rollover_authorized"),
+            default=-1,
+        )
+        current_events = events[last_rollover + 1:]
+        if submission_count(request) or any(value.get("event") in forbidden for value in current_events):
             raise ValidationError("submission evidence forbids an evidence retry")
         if (request.directory / "response.txt").exists():
             raise ValidationError("a saved response forbids an evidence retry")
