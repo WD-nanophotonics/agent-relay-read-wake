@@ -9,6 +9,15 @@ from chat_courier.owner import OwnerBusy, OwnerLease, read_owner
 
 
 class OwnerTests(unittest.TestCase):
+    def test_corrupt_owner_uses_last_known_good_copy(self):
+        with tempfile.TemporaryDirectory() as value, \
+                patch("chat_courier.owner.runtime_root", return_value=Path(value)):
+            lease = OwnerLease("P", "P-1")
+            lease.acquire("starting"); lease.update("waiting")
+            (Path(value) / "owner.json").write_text("{broken", encoding="utf-8")
+            self.assertEqual(read_owner().request_id, "P-1")
+            lease.release()
+
     def test_live_owner_blocks_second_owner_and_releases_cleanly(self):
         with tempfile.TemporaryDirectory() as value, \
                 patch("chat_courier.owner.runtime_root", return_value=Path(value)):

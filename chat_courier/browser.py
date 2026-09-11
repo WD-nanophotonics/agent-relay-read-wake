@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import time
 from typing import Any, Callable
@@ -14,7 +15,7 @@ from .model import (Request, atomic_json, chat_project_id_from_url,
                     conversation_id_from_url, project_landing_url, runtime_root,
                     same_chat_project)
 from .owner import OwnerBusy, OwnerLease, OwnerRecord, process_alive, read_owner, terminate_orphan_browser
-from .storage import save_response_cursor
+from .storage import ledger_reply, merge_conversation_ledger, request_events, save_response_cursor
 
 
 class BrowserError(RuntimeError):
@@ -630,6 +631,7 @@ class ChatSession:
         self.prepare_only = prepare_only
         self.inspect_project = inspect_project
         self.status_callback = status_callback
+        self.session_id = secrets.token_hex(12)
         self.attached_existing = False
         configured = os.environ.get("CHAT_COURIER_PROFILE") or os.environ.get("AGENT_RELAY_CHATGPT_PROFILE")
         legacy = Path(os.environ.get("LOCALAPPDATA", "")) / "CodexOrchestrator" / "profiles" / "chatgpt"
@@ -999,6 +1001,9 @@ class ChatSession:
         if self.page is None: raise BrowserError("browser session is not open")
         dom = ChatDom(self.page); previous: tuple[str, str] | None = None; stable = 0
         last_snapshot: dict[str, Any] = {}; sample_count = 0
+        rejected_identities = {str(item.get("assistant_identity")) for item in request_events(self.request)
+                               if item.get("event") in {"response_protocol_error", "response_ui_error"}
+                               and item.get("assistant_identity")}
         while time.monotonic() < deadline:
             sample_count += 1
             self.owner.update("waiting_for_response")
@@ -1015,6 +1020,15 @@ class ChatSession:
                 anchor_found, turns = dom.assistant_turns_after_latest_user()
             else:
                 raise BrowserError("reply wait requires a durable cursor or an outbound user-turn anchor")
+            # Exact protocol ownership outranks positional DOM heuristics. This
+            # remains valid when a human sends another turn before recovery.
+            envelope_turns = [turn for turn in all_turns
+                              if "CHAT_COURIER_REPLY/1" in turn.text
+                              and f"REQUEST_ID={self.request.request_id}" in turn.text]
+            if envelope_turns:
+                turns = envelope_turns
+                anchor_found = True
+            turns = [turn for turn in turns if turn.identity not in rejected_identities]
             is_streaming = dom.streaming()
             composer_ready = dom.ready_for_next_turn()
             snapshotter = getattr(dom, "latest_message_snapshot", None)
@@ -1059,6 +1073,19 @@ class ChatSession:
                     "streaming": is_streaming, "composer_ready": composer_ready,
                     **conversation,
                 })
+                if not is_streaming:
+                    ledger = merge_conversation_ledger(
+                        self.request, conversation, streaming=is_streaming,
+                        composer_ready=composer_ready,
+                        session_id=getattr(self, "session_id", "legacy-session"),
+                    )
+                    if not turns and composer_ready:
+                        prior = ledger_reply(self.request)
+                        if prior is not None:
+                            turns = [AssistantTurn(str(prior["identity"]),
+                                                   str(prior.get("text", "")),
+                                                   int(prior.get("ordinal", 0)))]
+                            anchor_found = True
                 atomic_json(self.request.directory / "latest-message.json", latest_message)
                 atomic_json(self.request.directory / "response-diagnostic.json", {
                     "version": 1, "project_id": self.request.project_id, "request_id": self.request.request_id,

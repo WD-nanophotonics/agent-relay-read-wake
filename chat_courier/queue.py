@@ -52,6 +52,10 @@ class CourierQueue:
     def path(self) -> Path:
         return self.root / "queue.json"
 
+    @property
+    def backup_path(self) -> Path:
+        return self.root / "queue.json.last-known-good"
+
     def _lock(self) -> RuntimeLock:
         return RuntimeLock("ChatCourier-QueueState", self.root)
 
@@ -61,12 +65,21 @@ class CourierQueue:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise QueueIntegrityError(f"invalid durable Courier queue: {self.path}") from exc
+            try: value = json.loads(self.backup_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raise QueueIntegrityError(f"invalid durable Courier queue: {self.path}") from exc
         if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("entries"), list):
             raise QueueIntegrityError(f"invalid durable Courier queue schema: {self.path}")
         return value
 
     def _save(self, value: dict[str, Any]) -> None:
+        if self.path.exists():
+            try:
+                current = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(current, dict) and current.get("version") == 1 and isinstance(current.get("entries"), list):
+                    atomic_json(self.backup_path, current)
+            except (OSError, json.JSONDecodeError):
+                pass
         atomic_json(self.path, value)
 
     @staticmethod
@@ -100,7 +113,9 @@ class CourierQueue:
             matching = [entry for entry in value["entries"] if entry.get("project_id") == self.request.project_id and entry.get("request_id") == self.request.request_id]
             if matching:
                 entry = matching[0]
-                if entry.get("fingerprint") != self.request.fingerprint:
+                payload_identity = getattr(self.request, "payload_fingerprint", self.request.fingerprint)
+                identity = entry.get("payload_fingerprint", entry.get("fingerprint"))
+                if identity not in {payload_identity, self.request.fingerprint}:
                     raise QueueIntegrityError("a live queue entry has this project/request ID with different content")
                 self.ticket = str(entry["ticket"])
                 if self.alive(int(entry.get("pid", 0))) and int(entry.get("pid", 0)) != self.pid:
@@ -126,7 +141,9 @@ class CourierQueue:
             entry = {
                 "ticket": secrets.token_urlsafe(12), "sequence": sequence, "state": "queued",
                 "project_id": self.request.project_id, "request_id": self.request.request_id,
-                "fingerprint": self.request.fingerprint, "request_directory": str(self.request.directory),
+                "fingerprint": self.request.fingerprint,
+                "payload_fingerprint": getattr(self.request, "payload_fingerprint", self.request.fingerprint),
+                "request_directory": str(self.request.directory),
                 "pid": self.pid, "enqueued_at": self.now(), "heartbeat_at": self.now(),
                 "queue_wait_started_at": self.now(), "queue_wait_accumulated_seconds": 0,
                 "queue_wait_seconds": self.request.queue_wait_seconds,
@@ -213,5 +230,6 @@ class CourierQueue:
         owner = None if current_owner is None else {
             "project_id": current_owner.get("project_id"), "request_id": current_owner.get("request_id"),
             "state": current_owner.get("state"), "workflow_window_seconds": current_owner.get("workflow_window_seconds"),
+            "request_directory": current_owner.get("request_directory"),
         }
         return QueueStatus(state, str(entry.get("ticket")), position, len(ahead_entries), waited, estimate, owner)

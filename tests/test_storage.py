@@ -8,13 +8,83 @@ from unittest.mock import patch
 
 from chat_courier.model import MAX_INLINE_MESSAGE_BYTES, ValidationError, load_request
 from chat_courier.storage import (event, load_receipt, load_response_capture, load_response_cursor,
-                                  receipt, save_latest_probe, save_response, save_response_capture,
+                                  ensure_target_binding, ledger_reply, merge_conversation_ledger,
+                                  receipt, request_events, save_latest_probe, save_response, save_response_capture,
                                   save_response_cursor, submission_count)
 from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confirmed,
-                              resend_once_command, retry_once_command, rollover_target_command)
+                              reconcile_command, resend_once_command, retry_once_command,
+                              rollover_target_command)
 
 
 class StorageTests(unittest.TestCase):
+    def test_reconcile_uses_two_absence_observations_once_then_freezes_uncertainty(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value); request = self.request(root)
+            receipt(request, "submission_unconfirmed", "uncertain")
+            event(request, "chat_submission_unconfirmed", phase="submit")
+            now = __import__("time").time()
+            (root / "absence-observations.json").write_text(json.dumps({
+                "version": 1, "project_id": "P", "request_id": "P-1",
+                "observations": [
+                    {"observed_at": now - 40, "session_id": "one",
+                     "payload_fingerprint": request.payload_fingerprint,
+                     "chat_url": request.chat_url, "streaming": False,
+                     "composer_ready": True, "anchor_found": False},
+                    {"observed_at": now, "session_id": "two",
+                     "payload_fingerprint": request.payload_fingerprint,
+                     "chat_url": request.chat_url, "streaming": False,
+                     "composer_ready": True, "anchor_found": False},
+                ],
+            }), encoding="utf-8")
+            def uncertain_again(_args):
+                receipt(request, "submission_unconfirmed", "still uncertain")
+                return 1
+            args = type("Args", (), {"request_directory": str(root)})()
+            with patch("chat_courier.model._load_registry", return_value={"P": request.chat_url}), \
+                    patch("chat_courier.cli.capture_latest_command", return_value=1), \
+                    patch("chat_courier.cli.run_command", side_effect=uncertain_again) as run:
+                self.assertEqual(reconcile_command(args), 1)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(load_receipt(request)["state"], "request_frozen")
+            self.assertEqual(sum(item.get("event") == "uncertain_auto_resend_authorized"
+                                 for item in request_events(request)), 1)
+
+    def test_target_rollover_changes_binding_not_payload_identity(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            (root / "message.txt").write_text("message", encoding="utf-8")
+            (root / "request.json").write_text(json.dumps({
+                "version": 1, "project_id": "P", "request_id": "P-1",
+            }), encoding="utf-8")
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/g/project/c/old"}):
+                old = load_request(root)
+            ensure_target_binding(old); receipt(old, "waiting_for_response", "sent")
+            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/g/project/c/new"}):
+                new = load_request(root)
+            binding = ensure_target_binding(new, basis="user_direct")
+            self.assertNotEqual(old.fingerprint, new.fingerprint)
+            self.assertEqual(old.payload_fingerprint, new.payload_fingerprint)
+            self.assertEqual(binding["generation"], 2)
+            self.assertEqual(binding["previous_url"], old.chat_url)
+            self.assertEqual(load_receipt(new)["state"], "waiting_for_response")
+
+    def test_partial_dom_snapshots_merge_and_exact_envelope_owns_reply(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            first = {"message_count": 2, "messages": [
+                {"ordinal": 0, "role": "user", "identity": "u1", "text": "REQUEST_ID=P-1",
+                 "text_sha256": "a", "request_ids": ["P-1"], "in_reply_to_request_id": None},
+            ]}
+            second = {"message_count": 2, "messages": [
+                {"ordinal": 1, "role": "assistant", "identity": "a1",
+                 "text": "CHAT_COURIER_REPLY/1\nREQUEST_ID=P-1\nSTATUS=CONTINUE\nBODY:\nok",
+                 "text_sha256": "b", "request_ids": ["P-1"], "in_reply_to_request_id": "P-1"},
+            ]}
+            merge_conversation_ledger(request, first, streaming=False, composer_ready=True, session_id="s1")
+            ledger = merge_conversation_ledger(request, second, streaming=False, composer_ready=True, session_id="s2")
+            self.assertEqual([item["identity"] for item in ledger["messages"]], ["u1", "a1"])
+            self.assertEqual(ledger_reply(request)["identity"], "a1")
+
     def test_oversized_inline_message_is_rejected_before_browser_use(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

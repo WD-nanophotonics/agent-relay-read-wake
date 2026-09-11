@@ -277,7 +277,7 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(receipt["next_action"], "agent_decision_required")
         self.assertTrue(receipt["safe_to_retry_same_request"])
 
-    def test_streaming_chat_waits_ten_minutes_and_reconnects_once(self):
+    def test_streaming_chat_polls_and_continues_as_soon_as_ready(self):
         calls = []
 
         def run_once(*_args, **_kwargs):
@@ -303,11 +303,11 @@ class CliPreflightTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(calls, ["connect", "connect"])
-        sleep.assert_called_once_with(600)
+        sleep.assert_called_once_with(10)
         waiting = next(item for item in events if item["event"] == "chat_busy_waiting")
         reconnecting = next(item for item in events if item["event"] == "chat_busy_reconnecting")
         self.assertTrue(waiting["ok"])
-        self.assertEqual(waiting["wait_seconds"], 600)
+        self.assertEqual(waiting["wait_seconds"], 10)
         self.assertFalse(waiting["agent_action_required"])
         self.assertEqual(waiting["safe_next_action"], "wait_for_same_request")
         self.assertEqual(reconnecting["reconnect_attempt"], 1)
@@ -334,14 +334,14 @@ class CliPreflightTests(unittest.TestCase):
         sleep.assert_not_called()
         self.assertEqual(final["event"], "submission_not_started")
 
-    def test_streaming_chat_never_reconnects_more_than_once(self):
+    def test_streaming_chat_polling_is_bounded_to_ten_minutes(self):
         busy = ChatComposerNotReady(
             "composer busy",
             {"visible": True, "editable": True, "streaming": True, "ready": False},
         )
         with tempfile.TemporaryDirectory() as value, patch(
             "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
-        ), patch("chat_courier.cli._run_session_once", side_effect=[busy, busy]) as run_once, patch(
+        ), patch("chat_courier.cli._run_session_once", side_effect=busy) as run_once, patch(
             "chat_courier.cli.time.sleep"
         ) as sleep:
             root = self.request_directory(Path(value))
@@ -352,8 +352,9 @@ class CliPreflightTests(unittest.TestCase):
             final = json.loads(output.getvalue().splitlines()[-1])
 
         self.assertEqual(code, 1)
-        self.assertEqual(run_once.call_count, 2)
-        sleep.assert_called_once_with(600)
+        self.assertEqual(run_once.call_count, 61)
+        self.assertEqual(sleep.call_count, 60)
+        sleep.assert_called_with(10)
         self.assertEqual(final["event"], "submission_not_started")
 
     def test_editable_composer_with_contended_focus_uses_bounded_wait(self):
@@ -385,7 +386,7 @@ class CliPreflightTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(calls, ["connect", "connect"])
-        sleep.assert_called_once_with(600)
+        sleep.assert_called_once_with(10)
         waiting = next(item for item in events if item["event"] == "chat_busy_waiting")
         self.assertEqual(waiting["contention_reason"], "shared_chat_focus_contended")
         self.assertFalse(waiting["agent_action_required"])

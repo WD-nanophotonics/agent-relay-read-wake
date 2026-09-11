@@ -98,8 +98,9 @@ During a normal `run`, a visible streaming indicator, or a visible, enabled,
 editable composer whose focus is temporarily contended, is treated as temporary
 shared-Chat contention rather than a transport failure. Courier emits the
 successful `chat_busy_waiting` state, records that no Agent action is required,
-holds the same immutable request for 600 seconds, and then reconnects exactly
-once. It emits `chat_busy_reconnecting` before that attempt. The Agent must not
+and checks again every 10 seconds for at most 600 seconds. It emits
+`chat_busy_reconnecting` before each bounded check and proceeds as soon as the
+composer is ready. The Agent must not
 retry, replace, or escalate the request while Courier reports this bounded
 wait. Other composer failures retain the existing fail-closed behavior.
 
@@ -210,20 +211,31 @@ before filling or sending anything and records `chat_auth_required`; sign in
 manually in that exact profile and retry the same request directory.
 
 ChatCourier asks ChatGPT to include `CHAT_COURIER_REPLY/1`, the project ID,
-and request ID. The response body is saved verbatim as `response.txt`. ChatGPT
+and request ID. Completed DOM observations are merged into
+`conversation-ledger.json`; partial history never replaces older evidence.
+Exact envelope ownership outranks message order, and the response cursor is
+only a performance hint. The response body is saved verbatim as `response.txt`. ChatGPT
 may choose task difficulty and instruction detail; the two optional request
 fields express only the local Agent's preference.
 
-If a run was interrupted after visible submission, rerunning the same request
+`courier_reconcile <request-dir>` is the common convergence operation used by
+typed dispatch and recovery. It separates the immutable `payload_fingerprint`
+from `target-binding.json`, so an authorized same-Project URL generation change
+does not invalidate old receipts or conversation evidence.
+
+If a run was interrupted after visible submission, reconciling the same request
 directory performs a read-only recovery and does not resend the request. A
 caller may first use `courier_capture_latest` to persist exact-request presence
 evidence without sending. For the narrow crash gap where the browser started
 but neither the exact user turn nor a submission event exists,
 `courier_retry_once` permits one fingerprint-bound retry of the unchanged
 request. It requires a fresh probe, no live Courier/browser owner, no response,
-and no prior evidence retry. It never changes the URL, profile, request ID, or
-payload. If the user turn exists, the request remains recovery-only and this
-operation refuses to resend it.
+and no prior evidence retry. For a genuinely uncertain Send, reconciliation
+uses two independent ready/non-streaming absence observations at least 30
+seconds apart and permits exactly one automatic resend. Any discovered request
+or reply cancels that resend; a still-uncertain retry freezes only that request
+for Supervisor review and releases the global queue. It never changes the URL,
+profile, request ID, or payload.
 received request is idempotent. Reusing its directory with changed input is
 rejected.
 

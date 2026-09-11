@@ -14,9 +14,10 @@ from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root, same_chat_project
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
-from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
+from .storage import (archive_response_capture, archive_target_generation, ensure_target_binding, event, load_receipt, load_response_capture,
                       evidence_retry_count, load_latest_probe, load_response_cursor, receipt,
                       request_events, request_was_submitted,
+                      record_absence_observation,
                       save_latest_response_capture, save_response, save_response_capture,
                       save_latest_probe, save_response_cursor, submission_count)
 from .workflow import (
@@ -27,7 +28,8 @@ from .workflow import (
 
 COURIER_SOURCE_ROOT = Path(__file__).resolve().parent.parent
 CHAT_CONTENTION_WAIT_SECONDS = 600
-CHAT_CONTENTION_RECONNECT_ATTEMPTS = 1
+CHAT_CONTENTION_POLL_SECONDS = 10
+CHAT_CONTENTION_RECONNECT_ATTEMPTS = CHAT_CONTENTION_WAIT_SECONDS // CHAT_CONTENTION_POLL_SECONDS
 _BUILD_COMPONENTS = (
     "cli.py", "browser.py", "model.py", "protocol.py", "queue.py",
     "owner.py", "liveness.py", "storage.py", "workflow.py",
@@ -69,6 +71,7 @@ def _queue_fields(status: QueueStatus) -> dict[str, object]:
 def validate_command(args: argparse.Namespace) -> int:
     try:
         request = load_request(args.request_directory)
+        ensure_target_binding(request)
     except ValidationError as exc:
         emit("validation_failed", ok=False, detail=str(exc), phase="validate")
         return 2
@@ -312,7 +315,20 @@ def _safe_pre_browser_turn_recovery(previous: dict | None, request=None) -> bool
     try:
         owner = read_owner()
         if owner is None:
-            return previous.get("state") != "submission_intent"
+            if previous.get("state") != "submission_intent":
+                return True
+            # The intent record is deliberately written before browser launch.
+            # If the process dies in that narrow gap, events prove no browser
+            # side effect was even attempted and the same request may resume.
+            events = request_events(request)
+            last_intent = max((index for index, item in enumerate(events)
+                               if item.get("event") == "submission_intent_written"),
+                              default=-1)
+            later = events[last_intent + 1:]
+            return not any(item.get("event") in {
+                "browser_launch_requested", "browser_started", "request_submitted",
+                "chat_submission_unconfirmed",
+            } for item in later)
         # A host can terminate Courier after it has written the initial owner
         # record but before Chrome is launched.  This exact shape is still a
         # pre-browser boundary: no browser PID and no CDP port were published,
@@ -375,7 +391,7 @@ def _chat_contention_snapshot(exc: Exception) -> dict[str, object] | None:
     return None
 
 
-def _wait_for_shared_chat(request, exc: Exception) -> None:
+def _wait_for_shared_chat(request, exc: Exception, attempt: int = 1) -> None:
     snapshot = _chat_contention_snapshot(exc) or {}
     contention_reason = (
         "shared_chat_streaming"
@@ -385,11 +401,11 @@ def _wait_for_shared_chat(request, exc: Exception) -> None:
     wait_started_at = time.time()
     values = {
         "contention_reason": contention_reason,
-        "wait_seconds": CHAT_CONTENTION_WAIT_SECONDS,
+        "wait_seconds": CHAT_CONTENTION_POLL_SECONDS,
         "wait_started_at": wait_started_at,
-        "wait_deadline_at": wait_started_at + CHAT_CONTENTION_WAIT_SECONDS,
+        "wait_deadline_at": wait_started_at + CHAT_CONTENTION_POLL_SECONDS,
         "runner_pid": os.getpid(),
-        "reconnect_attempt": 1,
+        "reconnect_attempt": attempt,
         "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,
         "agent_action_required": False,
         "safe_next_action": "wait_for_same_request",
@@ -398,7 +414,7 @@ def _wait_for_shared_chat(request, exc: Exception) -> None:
     }
     detail = (
         "The registered Chat is currently generating another turn. Courier will wait "
-        f"up to {CHAT_CONTENTION_WAIT_SECONDS // 60} minutes and reconnect once; "
+        f"check again in {CHAT_CONTENTION_POLL_SECONDS} seconds, for at most {CHAT_CONTENTION_WAIT_SECONDS // 60} minutes; "
         "the Agent must not retry, replace, or escalate this request while Courier is waiting."
     )
     receipt(request, "chat_busy_waiting", detail, **values)
@@ -408,11 +424,11 @@ def _wait_for_shared_chat(request, exc: Exception) -> None:
         project_id=request.project_id, request_id=request.request_id,
         detail=detail, **values,
     )
-    time.sleep(CHAT_CONTENTION_WAIT_SECONDS)
+    time.sleep(CHAT_CONTENTION_POLL_SECONDS)
     reconnect_values = {
         "contention_reason": contention_reason,
         "runner_pid": os.getpid(),
-        "reconnect_attempt": 1,
+        "reconnect_attempt": attempt,
         "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,
         "agent_action_required": False,
         "same_request_preserved": True,
@@ -454,7 +470,7 @@ def _run_after_queue(request, previous: dict | None, *, resend_once: bool = Fals
                             or contention_reconnects >= CHAT_CONTENTION_RECONNECT_ATTEMPTS):
                         raise
                     contention_reconnects += 1
-                    _wait_for_shared_chat(request, exc)
+                    _wait_for_shared_chat(request, exc, contention_reconnects)
                 except OwnerBusy as exc:
                     if not submitted:
                         raise BrowserError(str(exc)) from exc
@@ -598,6 +614,12 @@ def _wait_for_queue(request, previous: dict | None, *, evidence_retry: bool = Fa
             emit("queue_timeout", ok=False, phase="queue", project_id=request.project_id, request_id=request.request_id, **values)
             return None, 1
         if status.state == "recovery_required":
+            blocked_directory = (status.current_owner or {}).get("request_directory")
+            if isinstance(blocked_directory, str) and blocked_directory:
+                event(request, "queue_head_reconcile_started", phase="queue",
+                      blocked_request_directory=blocked_directory)
+                reconcile_command(argparse.Namespace(request_directory=blocked_directory))
+                continue
             values = {**fields, "next_action": "agent_decision_required", "safe_to_retry_same_request": False, "browser_started": False}
             receipt(request, "queue_recovery_required", "a prior active Courier request requires its original recovery", **values)
             event(request, "queue_recovery_required", phase="queue", **values)
@@ -618,6 +640,7 @@ def _wait_for_queue(request, previous: dict | None, *, evidence_retry: bool = Fa
 def run_command(args: argparse.Namespace) -> int:
     try:
         request = load_request(args.request_directory)
+        ensure_target_binding(request)
         if bool(getattr(args, "use_retry_message", False)) and request.retry_message:
             request = replace(request, message=request.retry_message)
         previous = load_receipt(request)
@@ -751,20 +774,7 @@ def wait_command(args: argparse.Namespace) -> int:
 
 
 def recover_command(args: argparse.Namespace) -> int:
-    try:
-        value = request_status(args.request_directory)
-    except ValidationError as exc:
-        emit("courier_recover_failed", ok=False, phase="recover", detail=str(exc))
-        return 2
-    if value["state"] == "response_received":
-        emit("response_duplicate", ok=True, phase="complete", **value)
-        return 0
-    if not value["recovery_only_required"]:
-        emit("courier_recover_failed", ok=False, phase="recover",
-             error_code="COURIER_RECOVERY_NOT_ALLOWED", retry_allowed=False,
-             safe_next_action="courier_status", **value)
-        return 2
-    return run_command(args)
+    return reconcile_command(args)
 
 
 def resend_once_command(args: argparse.Namespace) -> int:
@@ -809,6 +819,7 @@ def retry_once_command(args: argparse.Namespace) -> int:
     """Retry one apparently unsent immutable request after a fresh read-only probe."""
     try:
         request = load_request(args.request_directory)
+        ensure_target_binding(request)
         probe = load_latest_probe(request)
         events = request_events(request)
         owner = read_owner()
@@ -832,6 +843,9 @@ def retry_once_command(args: argparse.Namespace) -> int:
             raise ValidationError("a live Courier or browser owner still exists")
         try:
             previous = load_receipt(request)
+            if (previous is not None and previous.get("target_url") is not None
+                    and previous.get("target_url") != request.chat_url):
+                raise ValidationError("receipt belongs to the prior registered target")
         except ValidationError as original:
             intent_path = request.directory / "target-rollover.json"
             try:
@@ -1093,6 +1107,7 @@ def capture_latest_command(args: argparse.Namespace) -> int:
     """Capture the latest completed assistant turn without sending anything."""
     try:
         request = load_request(args.request_directory)
+        ensure_target_binding(request)
         owner = read_owner()
         if owner is not None and (process_alive(owner.owner_pid)
                                   or (owner.browser_pid and process_alive(owner.browser_pid))):
@@ -1109,7 +1124,7 @@ def capture_latest_command(args: argparse.Namespace) -> int:
             return 1
         with ChatSession(request, recovery=True) as session:
             candidate = session.wait_for_reply(
-                None, time.monotonic() + min(60, request.workflow_window_seconds),
+                None, time.monotonic() + min(int(getattr(args, "timeout", 60)), request.workflow_window_seconds),
                 after_user_marker=f"REQUEST_ID={request.request_id}",
             )
             if candidate is None:
@@ -1120,6 +1135,13 @@ def capture_latest_command(args: argparse.Namespace) -> int:
                     request, user_turn_found=bool(diagnostic.get("anchor_found")),
                     reply_found=False, live_owner_found=False,
                 )
+                if (diagnostic.get("streaming") is False
+                        and diagnostic.get("composer_ready") is True
+                        and not diagnostic.get("anchor_found")):
+                    record_absence_observation(
+                        request, session_id=session.session_id, streaming=False,
+                        composer_ready=True, anchor_found=False,
+                    )
                 emit("courier_capture_latest_empty", ok=False, phase="capture_latest",
                       error_code="LATEST_ASSISTANT_REPLY_NOT_FOUND", retry_allowed=True,
                       safe_next_action="courier_retry_once" if not probe["latest_user_turn_found"] else "courier_recover",
@@ -1184,6 +1206,111 @@ def capture_latest_command(args: argparse.Namespace) -> int:
          project_id=request.project_id, request_id=request.request_id, **values)
     return 0
 
+def reconcile_command(args: argparse.Namespace) -> int:
+    """Converge one immutable request from durable transport facts."""
+    try:
+        request = load_request(args.request_directory)
+        binding = ensure_target_binding(request)
+        current = load_receipt(request)
+    except ValidationError as exc:
+        emit("courier_reconcile_failed", ok=False, phase="reconcile", detail=str(exc))
+        return 2
+    state = current.get("state") if current else "prepared"
+    event(request, "reconcile_started", phase="reconcile", state=state,
+          target_generation=binding["generation"])
+    if state == "response_received":
+        emit("response_duplicate", ok=True, phase="complete",
+             project_id=request.project_id, request_id=request.request_id,
+             response_path=str(request.directory / "response.txt"))
+        return 0
+
+    # A rejected capture is an observation, not a permanent input. Preserve it
+    # and re-read the conversation before making another protocol decision.
+    if state in {"response_protocol_error", "response_ui_error"}:
+        archive_response_capture(request, max(1, evidence_retry_count(request) + 1))
+        event(request, "rejected_capture_archived", phase="reconcile", prior_state=state)
+
+    events = request_events(request)
+    sent = request_was_submitted(request)
+    last_rollover = max((index for index, item in enumerate(events)
+                         if item.get("event") == "target_rollover_authorized"), default=-1)
+    uncertain = any(item.get("event") in {"chat_submission_unconfirmed", "submission_unconfirmed"}
+                    for item in events[last_rollover + 1:])
+    if (not sent and not uncertain
+            and state in {"submission_intent", "browser_error", "courier_error",
+                          "queue_recovery_required", "submission_not_started", "queue_timeout"}):
+        event(request, "reconcile_proven_unsent", phase="reconcile", prior_state=state)
+        return run_command(argparse.Namespace(request_directory=args.request_directory))
+
+    externally_possible = state in {
+        "submission_intent", "request_submitted", "waiting_for_response",
+        "submission_unconfirmed", "response_timeout", "response_protocol_error",
+        "response_ui_error", "queue_recovery_required", "browser_error", "courier_error",
+    } or sent
+    if externally_possible:
+        captured = capture_latest_command(argparse.Namespace(request_directory=args.request_directory, timeout=10))
+        try: refreshed = load_receipt(request)
+        except ValidationError: refreshed = None
+        if refreshed and refreshed.get("state") == "response_received":
+            return 0
+
+        if state == "submission_unconfirmed" and captured != 0:
+            path = request.directory / "absence-observations.json"
+            def valid_absences() -> list[dict[str, object]]:
+                try: observations = json.loads(path.read_text(encoding="utf-8")).get("observations", [])
+                except (OSError, json.JSONDecodeError, AttributeError): observations = []
+                return [item for item in observations if isinstance(item, dict)
+                        and item.get("payload_fingerprint") == request.payload_fingerprint
+                        and item.get("chat_url") == request.chat_url
+                        and item.get("streaming") is False
+                        and item.get("composer_ready") is True
+                        and item.get("anchor_found") is False]
+            valid = valid_absences()
+            if valid and (len(valid) < 2
+                          or valid[-1].get("session_id") == valid[-2].get("session_id")
+                          or float(valid[-1].get("observed_at", 0)) - float(valid[-2].get("observed_at", 0)) < 30):
+                delay = max(0.0, 30.0 - (time.time() - float(valid[-1].get("observed_at", 0))))
+                if delay: time.sleep(delay)
+                second = capture_latest_command(argparse.Namespace(request_directory=args.request_directory, timeout=10))
+                if second == 0:
+                    return 0
+                valid = valid_absences()
+            distinct = len(valid) >= 2 and valid[-1].get("session_id") != valid[-2].get("session_id")
+            separated = distinct and float(valid[-1].get("observed_at", 0)) - float(valid[-2].get("observed_at", 0)) >= 30
+            already = any(item.get("event") == "uncertain_auto_resend_authorized"
+                          for item in request_events(request))
+            if separated and not already:
+                event(request, "uncertain_auto_resend_authorized", phase="reconcile",
+                      first_observed_at=valid[-2]["observed_at"],
+                      second_observed_at=valid[-1]["observed_at"])
+                resend_args = argparse.Namespace(request_directory=args.request_directory,
+                                                 resend_once=True, evidence_retry=True,
+                                                 use_retry_message=False)
+                result = run_command(resend_args)
+                latest = load_receipt(request)
+                if latest and latest.get("state") == "submission_unconfirmed":
+                    receipt(request, "request_frozen",
+                            "One evidence-based automatic resend remains uncertain; Supervisor review is required",
+                            agent_action_required=True, safe_next_action="notify_supervisor")
+                    event(request, "request_frozen", phase="reconcile",
+                          reason="automatic_resend_uncertain")
+                return result
+            if already:
+                receipt(request, "request_frozen",
+                        "Automatic uncertainty retry was already consumed; Supervisor review is required",
+                        agent_action_required=True, safe_next_action="notify_supervisor")
+                event(request, "request_frozen", phase="reconcile",
+                      reason="automatic_resend_already_consumed")
+            return captured
+
+        # Confirmed sends stay read-only; continue the same wait after the
+        # quick ledger search instead of constructing a replacement request.
+        if state in {"request_submitted", "waiting_for_response", "response_timeout",
+                     "response_protocol_error", "response_ui_error"} or request_was_submitted(request):
+            return run_command(argparse.Namespace(request_directory=args.request_directory))
+        return captured
+    return run_command(argparse.Namespace(request_directory=args.request_directory))
+
 def _profile_for_request(request) -> str:
     """Report the same deterministic profile selection used by ChatSession."""
     import os
@@ -1240,8 +1367,8 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--task-difficulty", choices=["normal", "hard", "challenge"], default="normal")
     prepare.add_argument("--instruction-level", choices=["normal", "detailed", "manual_book"], default="normal")
     prepare.set_defaults(handler=prepare_command)
-    dispatch = sub.add_parser("courier_dispatch", help="dispatch or automatically resume one request")
-    dispatch.add_argument("request_directory"); dispatch.set_defaults(handler=run_command)
+    dispatch = sub.add_parser("courier_dispatch", help="dispatch or mechanically reconcile one request")
+    dispatch.add_argument("request_directory"); dispatch.set_defaults(handler=reconcile_command)
     typed_status = sub.add_parser("courier_status", help="read one request state")
     typed_status.add_argument("request_directory"); typed_status.set_defaults(handler=status_command)
     typed_wait = sub.add_parser("courier_wait", help="wait without dispatching")
@@ -1249,6 +1376,8 @@ def main(argv: list[str] | None = None) -> int:
     typed_wait.set_defaults(handler=wait_command)
     typed_recover = sub.add_parser("courier_recover", help="recover an already submitted request")
     typed_recover.add_argument("request_directory"); typed_recover.set_defaults(handler=recover_command)
+    reconcile = sub.add_parser("courier_reconcile", help="reconcile one request from durable transport facts")
+    reconcile.add_argument("request_directory"); reconcile.set_defaults(handler=reconcile_command)
     resend_once = sub.add_parser("courier_resend_once", help="resend the same immutable request once")
     resend_once.add_argument("request_directory"); resend_once.set_defaults(handler=resend_once_command)
     retry_once = sub.add_parser("courier_retry_once", help="retry one apparently unsent immutable request after read-only proof")

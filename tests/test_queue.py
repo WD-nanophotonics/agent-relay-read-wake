@@ -22,6 +22,15 @@ def request(project: str, request_id: str, *, window: int = 600, queue_wait: int
 
 
 class QueueTests(unittest.TestCase):
+    def test_corrupt_queue_uses_last_known_good_copy(self):
+        with tempfile.TemporaryDirectory() as value:
+            clock, alive = Clock(), {101}
+            queue = CourierQueue(request("ALPHA", "A-1"), root=Path(value), now=clock,
+                                 alive=alive.__contains__, pid=101)
+            queue.join(); queue.poll()
+            (Path(value) / "queue.json").write_text("{broken", encoding="utf-8")
+            self.assertEqual(queue.observe().current_owner["project_id"], "ALPHA")
+
     def test_projects_run_in_fifo_order_and_estimate_front_window(self):
         with tempfile.TemporaryDirectory() as value:
             clock, alive = Clock(), {101, 202}

@@ -24,6 +24,9 @@ def _now() -> str:
 def owner_path() -> Path:
     return runtime_root() / "owner.json"
 
+def owner_backup_path() -> Path:
+    return runtime_root() / "owner.json.last-known-good"
+
 
 def mutex_name() -> str:
     # Windows object namespaces permit the Local/Global prefix followed by a
@@ -53,6 +56,11 @@ def read_owner() -> OwnerRecord | None:
         return None
     try:
         raw = __import__("json").loads(path.read_text(encoding="utf-8"))
+    except (OSError, __import__("json").JSONDecodeError) as exc:
+        try: raw = __import__("json").loads(owner_backup_path().read_text(encoding="utf-8"))
+        except (OSError, __import__("json").JSONDecodeError):
+            raise OwnerBusy(f"owner metadata is malformed: {path}") from exc
+    try:
         return OwnerRecord(
             project_id=str(raw["project_id"]), request_id=str(raw["request_id"]),
             owner_pid=int(raw["owner_pid"]), owner_nonce=str(raw["owner_nonce"]),
@@ -61,7 +69,7 @@ def read_owner() -> OwnerRecord | None:
             browser_pid=int(raw["browser_pid"]) if raw.get("browser_pid") is not None else None,
             profile=str(raw["profile"]) if raw.get("profile") is not None else None,
         )
-    except (OSError, KeyError, TypeError, ValueError, __import__("json").JSONDecodeError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise OwnerBusy(f"owner metadata is malformed: {path}") from exc
 
 
@@ -102,6 +110,13 @@ class OwnerLease:
     def _write(self) -> None:
         if self.record is not None:
             self.record.heartbeat_at = _now()
+            path = owner_path()
+            if path.exists():
+                try:
+                    raw = __import__("json").loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict): atomic_json(owner_backup_path(), raw)
+                except (OSError, __import__("json").JSONDecodeError):
+                    pass
             atomic_json(owner_path(), self.record.as_dict())
 
     def update(self, phase: str, *, cdp_port: int | None = None, browser_pid: int | None = None) -> OwnerRecord | None:

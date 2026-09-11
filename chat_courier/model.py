@@ -93,6 +93,7 @@ class Request:
     directory: Path; project_id: str; request_id: str; message_path: Path; message: str
     attachments: tuple[Path, ...]; workflow_window_seconds: int; queue_wait_seconds: int; task_difficulty: str
     instruction_level: str; report_policy: str; chat_url: str; fingerprint: str
+    payload_fingerprint: str
     retry_message: str | None = None
     idle_supervision_required: bool = False
     supervisor_task_id: str | None = None
@@ -257,7 +258,19 @@ def load_request(directory: str | Path) -> Request:
     registered_url = _load_registry().get(project_id)
     if not registered_url: raise ValidationError(f"no registered chat_url for project {project_id}; use the two-step register and confirm-register flow")
     if explicit_url is not None and explicit_url != registered_url:
-        raise ValidationError("request chat_url does not match the registered URL; propose and confirm a registration change instead")
+        # A v1 request may have repeated the then-current URL in request.json.
+        # Once v2 target binding exists, a confirmed same-Project rollover may
+        # move transport without mutating that immutable payload manifest.
+        binding_path = root / "target-binding.json"
+        try:
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            binding = None
+        if (not isinstance(binding, dict) or binding.get("project_id") != project_id
+                or binding.get("request_id") != request_id
+                or binding.get("chat_url") != explicit_url
+                or not same_chat_project(explicit_url, registered_url)):
+            raise ValidationError("request chat_url does not match the registered URL; propose and confirm a registration change instead")
     chat_url = registered_url
     digest = hashlib.sha256(); metadata = {"project_id": project_id, "request_id": request_id, "message_file": message_path.name, "attachments": values, "workflow_window_seconds": window, "task_difficulty": difficulty, "instruction_level": detail, "chat_url": chat_url}
     # Preserve fingerprints of legacy requests that predate this optional preference.
@@ -266,7 +279,15 @@ def load_request(directory: str | Path) -> Request:
     if "idle_supervision_required" in raw: metadata["idle_supervision_required"] = idle_supervision_required
     if supervisor_task_id is not None: metadata["supervisor_task_id"] = supervisor_task_id
     metadata["queue_wait_seconds"] = queue_wait
-    digest.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")); digest.update(message_path.read_bytes())
-    if retry_path: digest.update(retry_path.read_bytes())
-    for path in attachments: digest.update(path.name.encode("utf-8")); digest.update(path.read_bytes())
-    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, report_policy, chat_url, digest.hexdigest(), retry_message, idle_supervision_required, supervisor_task_id)
+    def finish(payload: dict[str, Any]) -> str:
+        value = hashlib.sha256()
+        value.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        value.update(message_path.read_bytes())
+        if retry_path: value.update(retry_path.read_bytes())
+        for path in attachments:
+            value.update(path.name.encode("utf-8")); value.update(path.read_bytes())
+        return value.hexdigest()
+    legacy_fingerprint = finish(metadata)
+    payload_metadata = dict(metadata); payload_metadata.pop("chat_url", None)
+    payload_fingerprint = finish(payload_metadata)
+    return Request(root, project_id, request_id, message_path, message, tuple(attachments), window, queue_wait, difficulty, detail, report_policy, chat_url, legacy_fingerprint, payload_fingerprint, retry_message, idle_supervision_required, supervisor_task_id)

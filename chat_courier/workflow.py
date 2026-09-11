@@ -18,11 +18,12 @@ PREPARED_SCHEMA = "chat-courier-prepared-v1"
 ATTACHMENT_SCHEMA = "chat-courier-attachments-v1"
 RECOVERY_ONLY_STATES = {
     "request_submitted", "waiting_for_response", "submission_unconfirmed",
-    "response_timeout", "response_protocol_error", "queue_recovery_required",
+    "response_timeout", "response_protocol_error", "response_ui_error", "queue_recovery_required",
 }
 TERMINAL_STATES = {
     "response_received", "chat_auth_required", "chat_access_denied",
     "chat_target_mismatch", "configuration_error", "browser_error", "courier_error",
+    "request_frozen",
 }
 
 
@@ -219,7 +220,7 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
         "terminal": state in TERMINAL_STATES and not recovery_only,
         "recovery_only_required": recovery_only,
         "response_path": str(request.directory / "response.txt") if state == "response_received" else None,
-        "fingerprint": request.fingerprint,
+        "fingerprint": request.fingerprint, "payload_fingerprint": request.payload_fingerprint,
         "contention_wait_active": contention_wait_active,
         "agent_action_required": receipt.get("agent_action_required") if receipt else None,
         "safe_next_action": receipt.get("safe_next_action") if receipt else None,
@@ -242,7 +243,7 @@ def capabilities() -> dict[str, Any]:
     projects = load_projects()
     return {
         "schema": "chat-courier-capabilities-v1",
-        "operations": ["courier_capabilities", "courier_prepare", "courier_dispatch",
+        "operations": ["courier_capabilities", "courier_prepare", "courier_dispatch", "courier_reconcile",
                        "courier_status", "courier_wait", "courier_recover",
                        "courier_capture_latest", "courier_retry_once", "courier_resend_once",
                        "courier_rollover_target"],
