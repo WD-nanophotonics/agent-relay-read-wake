@@ -907,13 +907,24 @@ def rollover_target_command(args: argparse.Namespace) -> int:
         request = load_request(args.request_directory)
         response_path = request.directory / "response.txt"
         if user_direct:
-            if (response_path.exists() or (request.directory / "receipt.json").exists()
-                    or request_events(request) or submission_count(request, total=True)):
+            events = request_events(request)
+            prior_count = submission_count(request, total=True)
+            prior = load_receipt(request)
+            pristine = prior is None and not events and prior_count == 0
+            confirmed_pending = (
+                prior_count == 1 and prior is not None
+                and prior.get("state") in {
+                    "waiting_for_response", "response_timeout", "queue_recovery_required",
+                }
+                and sum(value.get("event") == "request_submitted" for value in events) == 1
+                and not any(value.get("event") in {
+                    "chat_submission_unconfirmed", "response_received",
+                } for value in events)
+            )
+            if response_path.exists() or not (pristine or confirmed_pending):
                 raise ValidationError(
-                    "user-direct rollover requires a fresh unsubmitted handoff request"
+                    "user-direct rollover requires a fresh request or one confirmed pending submission"
                 )
-            prior = None
-            prior_count = 0
         else:
             if not response_path.is_file() or not is_conversation_exhausted(
                 response_path.read_text(encoding="utf-8-sig")
@@ -927,7 +938,7 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 raise ValidationError("the exhausted response is not bound to the active target")
             prior_count = submission_count(request, total=True)
         source_url = request.chat_url
-        queue, terminal = _wait_for_queue(request, None)
+        queue, terminal = _wait_for_queue(request, prior)
         if terminal is not None:
             return terminal
         assert queue is not None

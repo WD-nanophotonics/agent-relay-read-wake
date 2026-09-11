@@ -53,9 +53,10 @@ access, and page failures never authorize this operation. An uncertain
 successor creation is fail-closed and must not be retried into another Chat.
 
 When the user directly confirms that the current conversation is exhausted,
-the same command accepts a fresh, never-submitted handoff request with
-`--basis user_direct`. The successor remains constrained to the same ChatGPT
-Project and dedicated profile, and is registered only after its URL is proven.
+the same command accepts either a fresh request or exactly one confirmed
+pending submission with no reply, using `--basis user_direct`. The successor
+remains constrained to the same ChatGPT Project and dedicated profile, and is
+registered only after its URL is proven.
 
 Prepare a request directory containing `request.json`, `message.txt`, and any
 explicitly listed files under `attachments/`. Agents must use the bundled

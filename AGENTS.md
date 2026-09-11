@@ -214,11 +214,12 @@ not create another Chat.
 
 An explicit current user instruction to replace an exhausted conversation may
 instead authorize `courier_rollover_target <fresh-handoff-request-dir> --basis
-user_direct`. This form accepts only a fresh request with no receipt, events,
-response, or prior submission. It still derives the Project from the registered
-source URL, creates exactly one successor inside that Project with the same
-profile, sends the handoff once, and atomically registers the proven successor.
-It must never be inferred from a generic browser or composer failure.
+user_direct`. This form accepts either a fresh request or exactly one confirmed
+pending submission with no reply. A pending source generation is archived, and
+the same immutable request is sent once in the successor. It still derives the
+Project from the registered source URL, creates exactly one successor inside
+that Project with the same profile, and atomically registers the proven
+successor. It must never be inferred from a generic browser or composer failure.
 
 ## Chat URL registration
 
