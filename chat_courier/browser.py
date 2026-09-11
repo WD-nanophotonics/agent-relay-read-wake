@@ -727,6 +727,7 @@ class ChatSession:
         deadline = time.monotonic() + timeout_seconds
         checked: set[str] = set()
         matches: set[str] = set()
+        diagnostic: dict[str, Any] = {}
         while time.monotonic() < deadline:
             self.page.goto(landing, wait_until="domcontentloaded", timeout=120000)
             if chat_project_id_from_url(self.page.url) != source_project:
@@ -734,6 +735,7 @@ class ChatSession:
                     "ChatGPT navigation left the registered Project during rollover recovery"
                 )
             self.page.wait_for_timeout(1000)
+            dom = ChatDom(self.page)
             hrefs = self.page.locator("a[href]").evaluate_all(
                 "nodes => nodes.map(node => node.href).filter(Boolean)"
             )
@@ -751,12 +753,34 @@ class ChatSession:
                 user_turns = self.page.locator(ChatDom.user_selector).all_inner_texts()
                 if any(marker in text for text in user_turns):
                     matches.add(candidate)
+            try:
+                body = self.page.locator("body").inner_text(timeout=2000).lower()
+            except Exception:
+                body = ""
+            diagnostic = {
+                "page_url": self.page.url,
+                "page_title": self.page.title(),
+                "authentication_required": dom.authentication_required(),
+                "access_denied": dom.access_denied(),
+                "rate_limited": any(value in body for value in (
+                    "rate limit", "too many requests", "try again later",
+                    "you've reached", "reached your limit", "达到上限", "请求过多",
+                )),
+                "link_count": len(hrefs),
+                "same_project_candidate_count": len(checked),
+                "checked_urls": sorted(checked),
+                "match_count": len(matches),
+            }
+            atomic_json(self.request.directory / "rollover-recovery-diagnostic.json", diagnostic)
             if len(matches) == 1:
                 return next(iter(matches))
             if len(matches) > 1:
                 raise BrowserError("multiple same-Project successor chats contain the request marker")
             self.page.wait_for_timeout(1000)
-        raise BrowserError("the confirmed successor chat was not found by its request marker")
+        raise BrowserError(
+            "the confirmed successor chat was not found by its request marker; "
+            f"diagnostic_path={self.request.directory / 'rollover-recovery-diagnostic.json'}"
+        )
 
     def submit(self, text: str, files: tuple[Path, ...] = (), *, marker: str | None = None,
                include_empty_baseline: bool = False) -> set[str]:

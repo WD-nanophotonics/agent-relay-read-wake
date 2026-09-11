@@ -142,17 +142,23 @@ class BrowserContractTests(unittest.TestCase):
             def evaluate_all(self, _script): return [successor] if self.selector == "a[href]" else []
             def all_inner_texts(self):
                 return ["REQUEST_ID=P-1"] if self.page.url == successor else []
+            def inner_text(self, **_kwargs): return ""
 
         class Page:
             def __init__(self): self.url = source
             def goto(self, url, **_kwargs): self.url = url
+            def title(self): return "Project"
             def wait_for_timeout(self, _milliseconds): pass
             def locator(self, selector): return Locator(self, selector)
 
         session = object.__new__(ChatSession)
         session.page = Page()
-        session.request = type("Request", (), {"chat_url": source})()
-        self.assertEqual(session.recover_successor_url("P-1"), successor)
+        with tempfile.TemporaryDirectory() as value:
+            session.request = type("Request", (), {"chat_url": source, "directory": Path(value)})()
+            self.assertEqual(session.recover_successor_url("P-1"), successor)
+            diagnostic = json.loads((Path(value) / "rollover-recovery-diagnostic.json").read_text(encoding="utf-8"))
+        self.assertEqual(diagnostic["same_project_candidate_count"], 1)
+        self.assertEqual(diagnostic["match_count"], 1)
 
     def test_access_denied_text_is_detected_before_composer_use(self):
         class Locator:
