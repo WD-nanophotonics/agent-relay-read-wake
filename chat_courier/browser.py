@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any, Callable
@@ -415,7 +416,7 @@ class ChatDom:
 
     def assistant_turns_after_user_marker(self, marker: str) -> tuple[bool, list[AssistantTurn]]:
         """Return assistant turns after the latest exact Courier user turn."""
-        result: list[AssistantTurn] = []; anchor_found = False
+        result: list[AssistantTurn] = []; anchor_found = False; collecting = False
         locator = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
         try: count = locator.count()
         except Exception as exc: raise BrowserError(f"conversation DOM is unavailable: {exc}") from exc
@@ -431,15 +432,61 @@ class ChatDom:
             is_assistant = role == "assistant" or "conversation-turn-assistant" in testid
             if is_user:
                 if marker in text:
-                    anchor_found = True; result = []
-                elif anchor_found:
-                    anchor_found = False; result = []
+                    anchor_found = True; collecting = True; result = []
+                elif collecting:
+                    # A later human turn closes the Courier reply interval but
+                    # must not erase a reply already observed in that interval.
+                    collecting = False
                 continue
-            if anchor_found and is_assistant and text:
+            if collecting and is_assistant and text:
                 try: identity = node.get_attribute("data-message-id") or f"{index}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
                 except Exception: continue
                 result.append(AssistantTurn(identity, text, index))
         return anchor_found, result
+
+    def conversation_snapshot(self, limit: int = 20) -> dict[str, Any]:
+        """Return a mechanical recent-turn ledger with request ownership."""
+        locator = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
+        try: count = locator.count()
+        except Exception as exc:
+            return {"message_count": None, "messages": [],
+                    "error": f"{type(exc).__name__}: {exc}"}
+        messages: list[dict[str, Any]] = []
+        current_request_id: str | None = None
+        start = max(0, count - max(1, limit))
+        for index in range(start, count):
+            node = locator.nth(index)
+            try:
+                text = node.inner_text().strip()
+                role = (node.get_attribute("data-message-author-role") or "").lower()
+                testid = (node.get_attribute("data-testid") or "").lower()
+                if not role:
+                    if "conversation-turn-user" in testid: role = "user"
+                    elif "conversation-turn-assistant" in testid: role = "assistant"
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                identity = node.get_attribute("data-message-id") or f"{index}:{digest}"
+            except Exception:
+                continue
+            request_ids = sorted(set(re.findall(
+                r"REQUEST_ID=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})", text,
+            )))
+            if role == "user":
+                current_request_id = request_ids[-1] if request_ids else None
+            messages.append({
+                "ordinal": index, "role": role or "unknown", "identity": identity,
+                "text": text, "text_sha256": digest, "request_ids": request_ids,
+                "in_reply_to_request_id": current_request_id if role == "assistant" else None,
+            })
+        return {"message_count": count, "messages": messages}
+
+    def latest_message_snapshot(self) -> dict[str, Any]:
+        """Read the final rendered conversation turn as local recovery evidence."""
+        snapshot = self.conversation_snapshot(limit=1)
+        messages = snapshot.get("messages", [])
+        if not messages:
+            return {"message_count": snapshot.get("message_count"), "role": None,
+                    **({"error": snapshot["error"]} if "error" in snapshot else {})}
+        return {"message_count": snapshot.get("message_count"), **messages[-1]}
 
     def streaming(self) -> bool:
         try:
@@ -456,17 +503,7 @@ class ChatDom:
 
     def ready_for_next_turn(self) -> bool:
         """Return true once ChatGPT restored the composer after generation."""
-        if self.streaming():
-            return False
-        try:
-            self.composer()
-            for selector in self.send_selectors:
-                button = self.page.locator(selector).last
-                if button.count() and button.is_visible():
-                    return True
-        except Exception:
-            return False
-        return False
+        return bool(self.composer_health().get("ready"))
 
     @staticmethod
     def attachment_manifest(files: tuple[Path, ...]) -> list[dict[str, Any]]:
@@ -980,12 +1017,49 @@ class ChatSession:
                 raise BrowserError("reply wait requires a durable cursor or an outbound user-turn anchor")
             is_streaming = dom.streaming()
             composer_ready = dom.ready_for_next_turn()
+            snapshotter = getattr(dom, "latest_message_snapshot", None)
+            if callable(snapshotter):
+                latest_message = snapshotter()
+            elif all_turns:
+                fallback = all_turns[-1]
+                latest_message = {
+                    "message_count": len(all_turns), "ordinal": fallback.index,
+                    "role": "assistant", "identity": fallback.identity,
+                    "text": fallback.text,
+                    "text_sha256": hashlib.sha256(fallback.text.encode("utf-8")).hexdigest(),
+                    "request_ids": [],
+                }
+            else:
+                latest_message = {"message_count": 0, "role": None}
+            latest_message.update({
+                "version": 1,
+                "project_id": self.request.project_id,
+                "request_id": self.request.request_id,
+                "captured_at": time.time(),
+                "anchor_found": anchor_found,
+                "belongs_to_request": bool(
+                    anchor_found and latest_message.get("role") == "assistant"
+                ),
+                "streaming": is_streaming,
+                "composer_ready": composer_ready,
+            })
             last_snapshot = {
                 "assistant_turn_count": len(all_turns), "candidate_count": len(turns),
                 "anchor_found": anchor_found, "streaming": is_streaming,
                 "composer_ready": composer_ready, "sample_count": sample_count,
             }
             if sample_count == 1 or sample_count % 5 == 0:
+                conversation_snapshotter = getattr(dom, "conversation_snapshot", None)
+                conversation = (conversation_snapshotter() if callable(conversation_snapshotter)
+                                else {"message_count": latest_message.get("message_count"),
+                                      "messages": []})
+                atomic_json(self.request.directory / "conversation-snapshot.json", {
+                    "version": 1, "project_id": self.request.project_id,
+                    "request_id": self.request.request_id, "captured_at": time.time(),
+                    "streaming": is_streaming, "composer_ready": composer_ready,
+                    **conversation,
+                })
+                atomic_json(self.request.directory / "latest-message.json", latest_message)
                 atomic_json(self.request.directory / "response-diagnostic.json", {
                     "version": 1, "project_id": self.request.project_id, "request_id": self.request.request_id,
                     "state": "waiting", "captured_at": time.time(), **last_snapshot,
@@ -998,7 +1072,9 @@ class ChatSession:
             if turns and not is_streaming and composer_ready:
                 latest = turns[-1]; sample = (latest.identity, latest.text)
                 stable = stable + 1 if sample == previous else 1; previous = sample
-                if stable >= 3: return latest
+                if stable >= 3:
+                    atomic_json(self.request.directory / "latest-message.json", latest_message)
+                    return latest
             else: previous = None; stable = 0
             self.page.wait_for_timeout(1000)
         atomic_json(self.request.directory / "response-diagnostic.json", {

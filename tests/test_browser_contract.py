@@ -189,6 +189,75 @@ class BrowserContractTests(unittest.TestCase):
                 return Element(visible=True)
         self.assertFalse(ChatDom(Page()).authentication_required())
 
+    def test_empty_composer_is_ready_without_a_visible_send_button(self):
+        class Element:
+            @property
+            def last(self): return self
+            @property
+            def first(self): return self
+            def count(self): return 1
+            def is_visible(self): return True
+            def is_enabled(self): return True
+            def is_editable(self): return True
+            def get_attribute(self, _name): return None
+        class Missing:
+            @property
+            def last(self): return self
+            @property
+            def first(self): return self
+            def count(self): return 0
+        class Page:
+            url = "https://chatgpt.com/c/conversation"
+            def title(self): return "Chat"
+            def locator(self, selector):
+                if selector in ChatDom.composer_selectors:
+                    return Element()
+                return Missing()
+        self.assertTrue(ChatDom(Page()).ready_for_next_turn())
+
+    def test_latest_message_snapshot_records_role_identity_hash_and_request_id(self):
+        class Node:
+            def inner_text(self): return "REQUEST_ID=P-1\nreply"
+            def get_attribute(self, name):
+                return {"data-message-author-role": "assistant",
+                        "data-message-id": "message-7"}.get(name)
+        class Locator:
+            def count(self): return 1
+            def nth(self, _index): return Node()
+        class Page:
+            def locator(self, _selector): return Locator()
+        snapshot = ChatDom(Page()).latest_message_snapshot()
+        self.assertEqual(snapshot["role"], "assistant")
+        self.assertEqual(snapshot["identity"], "message-7")
+        self.assertEqual(snapshot["request_ids"], ["P-1"])
+        self.assertEqual(len(snapshot["text_sha256"]), 64)
+
+    def test_marker_reply_survives_a_later_human_turn(self):
+        turns = [
+            ("user", "REQUEST_ID=P-1\nrequest", "u1"),
+            ("assistant", "R4 reply", "a1"),
+            ("user", "test", "u2"),
+            ("assistant", "1", "a2"),
+        ]
+        class Node:
+            def __init__(self, value): self.value = value
+            def inner_text(self): return self.value[1]
+            def get_attribute(self, name):
+                return {"data-message-author-role": self.value[0],
+                        "data-message-id": self.value[2]}.get(name)
+        class Locator:
+            def count(self): return len(turns)
+            def nth(self, index): return Node(turns[index])
+        class Page:
+            def locator(self, _selector): return Locator()
+        dom = ChatDom(Page())
+        found, replies = dom.assistant_turns_after_user_marker("REQUEST_ID=P-1")
+        self.assertTrue(found)
+        self.assertEqual([turn.identity for turn in replies], ["a1"])
+        snapshot = dom.conversation_snapshot()
+        self.assertEqual(snapshot["messages"][1]["in_reply_to_request_id"], "P-1")
+        self.assertIsNone(snapshot["messages"][3]["in_reply_to_request_id"])
+
     def test_auth_url_remains_authoritative_even_if_composer_is_visible(self):
         class Composer:
             @property
