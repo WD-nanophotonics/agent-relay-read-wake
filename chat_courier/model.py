@@ -53,6 +53,27 @@ def conversation_id_from_url(value: object) -> str | None:
     if len(parts) >= 3 and parts[-2] == "c": return parts[-1]
     return None
 
+def chat_project_id_from_url(value: object) -> str | None:
+    """Return the ChatGPT Project container for a project conversation URL."""
+    if not isinstance(value, str): return None
+    try: parsed = urlsplit(value)
+    except ValueError: return None
+    if parsed.scheme != "https" or parsed.hostname not in {"chatgpt.com", "www.chatgpt.com"} or parsed.username or parsed.password or parsed.port: return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 4 and parts[-4] == "g" and parts[-2] == "c": return parts[-3]
+    if len(parts) >= 3 and parts[-3] == "g" and parts[-1] == "project": return parts[-2]
+    return None
+
+def project_landing_url(value: object) -> str | None:
+    """Derive the new-chat landing page for the same ChatGPT Project."""
+    project = chat_project_id_from_url(value)
+    if project is None: return None
+    return f"https://chatgpt.com/g/{project}/project"
+
+def same_chat_project(left: object, right: object) -> bool:
+    project = chat_project_id_from_url(left)
+    return project is not None and project == chat_project_id_from_url(right)
+
 def valid_chat_url(value: object) -> bool:
     return conversation_id_from_url(value) is not None
 
@@ -145,6 +166,34 @@ def confirm_url_registration(project_id: str, confirmation_id: str, basis: str) 
         registry[project_id] = url; atomic_json(registry_path(), registry)
         pending.pop(project_id, None); atomic_json(pending_registry_path(), pending)
         return {"project_id": project_id, "url": url, "previous_url": previous, "changed": previous != url, "basis": basis}
+
+def commit_exhausted_conversation_rollover(project_id: str, source_url: str,
+                                           successor_url: str) -> dict[str, Any]:
+    """Atomically bind a verified successor inside the source ChatGPT Project."""
+    if not IDENTIFIER.fullmatch(project_id): raise ValidationError("project_id is invalid")
+    if conversation_id_from_url(source_url) is None or conversation_id_from_url(successor_url) is None:
+        raise ValidationError("source and successor must be ChatGPT conversation URLs")
+    if source_url == successor_url:
+        raise ValidationError("successor conversation must differ from the exhausted source")
+    if not same_chat_project(source_url, successor_url):
+        raise ValidationError("successor conversation must stay inside the source ChatGPT Project")
+    with RuntimeLock("ChatCourier-RegistryState", runtime_root()):
+        registry = _load_registry(); current = registry.get(project_id)
+        if current == successor_url:
+            return {"project_id": project_id, "url": successor_url,
+                    "previous_url": source_url, "changed": False,
+                    "basis": "verified_context_capacity"}
+        if current != source_url:
+            raise ValidationError("project registration changed during conversation rollover")
+        registry[project_id] = successor_url
+        atomic_json(registry_path(), registry)
+        pending = _load_pending_registrations()
+        if project_id in pending:
+            pending.pop(project_id, None)
+            atomic_json(pending_registry_path(), pending)
+        return {"project_id": project_id, "url": successor_url,
+                "previous_url": source_url, "changed": True,
+                "basis": "verified_context_capacity"}
 
 def load_request(directory: str | Path) -> Request:
     root = Path(directory).resolve(); manifest = root / "request.json"; _regular_file(manifest, "request.json")

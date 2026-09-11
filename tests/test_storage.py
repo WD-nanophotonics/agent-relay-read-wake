@@ -243,14 +243,16 @@ class StorageTests(unittest.TestCase):
                     "current",
                 )
 
-    def test_user_confirmed_target_rollover_preserves_old_state_and_resets_active_count(self):
+    def test_verified_same_project_rollover_preserves_old_state_and_resets_active_count(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
             (root / "message.txt").write_text("immutable report", encoding="utf-8")
             (root / "request.json").write_text(json.dumps({
                 "version": 1, "project_id": "P", "request_id": "P-1",
             }), encoding="utf-8")
-            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/old"}):
+            old_url = "https://chatgpt.com/g/g-p-project/c/old"
+            new_url = "https://chatgpt.com/g/g-p-project/c/new"
+            with patch("chat_courier.model._load_registry", return_value={"P": old_url}):
                 old_request = load_request(root)
             receipt(old_request, "response_received", "old target exhausted")
             (root / "response.txt").write_text(
@@ -263,15 +265,34 @@ class StorageTests(unittest.TestCase):
                 encoding="utf-8",
             )
             args = type("Args", (), {"request_directory": str(root)})()
-            with patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/new"}), \
-                    patch("chat_courier.cli.run_command", return_value=0) as run:
-                self.assertEqual(rollover_target_command(args), 0)
-                run.assert_called_once_with(args)
+            with patch("chat_courier.model._load_registry", return_value={"P": new_url}):
                 active_request = load_request(root)
-            self.assertEqual(submission_count(active_request), 0)
-            self.assertEqual(submission_count(active_request, total=True), 2)
+
+            class Session:
+                profile = Path("profile")
+                def __init__(self, *_args, **_kwargs): pass
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def prepare_successor_project_chat(self): pass
+                def submit(self, *_args): return {"baseline"}
+                def wait_for_successor_url(self): return new_url
+
+            class Queue:
+                def complete(self): pass
+
+            with patch("chat_courier.cli.load_request", side_effect=[old_request, active_request]), \
+                    patch("chat_courier.cli.ChatSession", Session), \
+                    patch("chat_courier.cli._wait_for_queue", return_value=(Queue(), None)), \
+                    patch("chat_courier.cli.commit_exhausted_conversation_rollover"), \
+                    patch("chat_courier.cli._capture_response", return_value="response_captured"), \
+                    patch("chat_courier.cli._parse_captured_response",
+                          return_value=("response_received", "continued", {})):
+                self.assertEqual(rollover_target_command(args), 0)
+            self.assertEqual(submission_count(active_request), 1)
+            self.assertEqual(submission_count(active_request, total=True), 3)
             self.assertTrue((root / "target-generation-1" / "receipt.json").is_file())
             self.assertTrue((root / "target-generation-1" / "response.txt").is_file())
+            self.assertEqual((root / "response.txt").read_text(encoding="utf-8"), "continued")
 
     def test_queue_provenance_survives_final_receipt_transition(self):
         with tempfile.TemporaryDirectory() as value:

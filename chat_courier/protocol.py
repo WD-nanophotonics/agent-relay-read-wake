@@ -15,7 +15,12 @@ def is_chat_ui_error(text: str) -> bool:
 def is_conversation_exhausted(text: str) -> bool:
     """Recognize Chat's terminal per-conversation length notice."""
     normalized = " ".join(text.replace("’", "'").split()).casefold()
-    return normalized.startswith("you've reached the maximum length for this conversation")
+    return any(normalized.startswith(marker) for marker in (
+        "you've reached the maximum length for this conversation",
+        "you have reached the maximum length for this conversation",
+        "此对话已达到最大长度",
+        "此对话已达最大长度",
+    ))
 
 @dataclass(frozen=True)
 class Reply:

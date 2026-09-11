@@ -7,11 +7,44 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from chat_courier.model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, DEFAULT_QUEUE_WAIT_SECONDS, DEFAULT_WINDOW_SECONDS, ValidationError, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration
-from chat_courier.protocol import BEGIN_RESPONSE, END_RESPONSE, REPLY_PROTOCOL, build_prompt, parse_reply
+from chat_courier.model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, DEFAULT_QUEUE_WAIT_SECONDS, DEFAULT_WINDOW_SECONDS, ValidationError, chat_project_id_from_url, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, project_landing_url, propose_url_registration, same_chat_project
+from chat_courier.protocol import BEGIN_RESPONSE, END_RESPONSE, REPLY_PROTOCOL, build_prompt, is_conversation_exhausted, parse_reply
 
 
 class ModelProtocolTests(unittest.TestCase):
+    def test_conversation_exhaustion_requires_the_specific_terminal_notice(self):
+        self.assertTrue(is_conversation_exhausted(
+            "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat."))
+        self.assertTrue(is_conversation_exhausted("此对话已达到最大长度，请开始新聊天。"))
+        self.assertFalse(is_conversation_exhausted("ChatGPT composer was not ready"))
+        self.assertFalse(is_conversation_exhausted("Connection interrupted"))
+
+    def test_project_conversation_derivation_is_same_project_only(self):
+        source = "https://chatgpt.com/g/g-p-project/c/old"
+        self.assertEqual(chat_project_id_from_url(source), "g-p-project")
+        self.assertEqual(project_landing_url(source),
+                         "https://chatgpt.com/g/g-p-project/project")
+        self.assertTrue(same_chat_project(source,
+                        "https://chatgpt.com/g/g-p-project/c/new"))
+        self.assertFalse(same_chat_project(source,
+                         "https://chatgpt.com/g/g-p-other/c/new"))
+        self.assertIsNone(project_landing_url("https://chatgpt.com/c/plain"))
+
+    def test_rollover_registration_is_atomic_idempotent_and_rejects_other_project(self):
+        with tempfile.TemporaryDirectory() as value, \
+                patch("chat_courier.model.runtime_root", return_value=Path(value)):
+            source = "https://chatgpt.com/g/g-p-project/c/old"
+            target = "https://chatgpt.com/g/g-p-project/c/new"
+            (Path(value) / "chat_urls.json").write_text(
+                json.dumps({"P": source}), encoding="utf-8")
+            first = commit_exhausted_conversation_rollover("P", source, target)
+            second = commit_exhausted_conversation_rollover("P", source, target)
+            self.assertTrue(first["changed"])
+            self.assertFalse(second["changed"])
+            with self.assertRaisesRegex(ValidationError, "source ChatGPT Project"):
+                commit_exhausted_conversation_rollover(
+                    "P", target, "https://chatgpt.com/g/g-p-other/c/new")
+
     def make_request(self, root: Path, **changes):
         message = changes.pop("message", "Please prepare the next task.")
         (root / "message.txt").write_text(message, encoding="utf-8")

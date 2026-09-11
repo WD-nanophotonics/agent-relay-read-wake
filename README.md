@@ -44,6 +44,14 @@ cannot replace its project's registration via `request.json`; a different
 `chat_url` is rejected. Do not register a new URL merely to work around
 “You don't have access” or another browser error—report that condition.
 
+If Chat itself returns its exact maximum-conversation-length notice, run
+`chat-courier courier_rollover_target <request-dir>`. This narrow operation
+derives the existing ChatGPT Project, starts one successor Chat inside it using
+the same dedicated profile, resends the immutable request once, and atomically
+updates the project registration. Ordinary composer, network, authentication,
+access, and page failures never authorize this operation. An uncertain
+successor creation is fail-closed and must not be retried into another Chat.
+
 Prepare a request directory containing `request.json`, `message.txt`, and any
 explicitly listed files under `attachments/`. Agents must use the bundled
 Windows command launcher, which forces the repository source root and reports the

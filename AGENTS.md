@@ -121,7 +121,7 @@ authorization to edit either message after submission.
 | `submission_not_started` | Read `receipt.json` and `transport_diagnostic.json`. No Send occurred; after the browser condition is resolved, the same unchanged directory may be run again. Decide any alternative evidence strategy outside Courier. |
 | `chat_submission_unconfirmed` | Treat external Send as uncertain. Do not resend or create another request ID; rerun the same unchanged directory only for Courier's read-only recovery. |
 | `response_timeout` or `response_protocol_error` | Send was already confirmed. Search/read first; a project bridge may then use its single bounded resend with the pre-registered immutable retry message. |
-| `chat_composer_not_ready` | The page is visible but cannot safely accept text. Report the snapshot; do not create a replacement Chat or use another transport. |
+| `chat_composer_not_ready` | The page is visible but cannot safely accept text. Report the snapshot; do not infer conversation exhaustion or create a replacement Chat. |
 | `chat_auth_required`, `chat_access_denied`, `chat_target_mismatch`, `configuration_error`, or `browser_error` before submission | Stop and report the structured event. Do not change profile variables, create a new Chat, or route around Courier. |
 
 `preflight` is an optional human diagnostic, not part of the Agent workflow.
@@ -192,9 +192,29 @@ returns `chat_target_mismatch` and sends nothing. If the target itself says
 “You don't have access”, it returns `chat_access_denied` and sends nothing.
 Neither event authorizes creating or using a one-off ChatGPT conversation.
 
+### Verified context-capacity rollover
+
+A completed Chat reply that exactly reports the per-conversation maximum-length
+condition is the sole exception to the fixed-conversation rule. It authorizes
+`courier_rollover_target <request-dir>` for that same immutable request. Courier
+derives the Project from the registered `/g/<project>/c/<conversation>` URL,
+opens the new-chat surface inside that Project using the same dedicated browser
+profile, sends the request once, and atomically registers the resulting
+conversation URL. The exhausted response and receipt are retained under a
+numbered `target-generation-*` directory.
+
+Do not use rollover for a generic composer timeout, network error, access error,
+missing page, protocol error, or an uncertain Send. A rollover may never leave
+the source ChatGPT Project or use another browser/profile. If creation is
+interrupted before Courier proves the successor URL, do not try again: inspect
+`target-rollover.json` and escalate the uncertain external state. Re-running a
+rollover with a proven successor URL only resumes that same successor; it does
+not create another Chat.
+
 ## Chat URL registration
 
-The registered project URL is the default and must be reused. A request may
+The registered project URL is the default and must be reused, except for the
+verified context-capacity rollover above. A request may
 omit `chat_url`, or repeat the already registered URL for legacy compatibility;
 it may never silently select a different conversation.
 

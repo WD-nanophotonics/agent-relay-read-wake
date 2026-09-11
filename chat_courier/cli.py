@@ -11,14 +11,14 @@ import time
 
 from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
-from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root
+from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
 from .queue import CourierQueue, QueueIntegrityError, QueueStatus
 from .storage import (archive_response_capture, archive_target_generation, event, load_receipt, load_response_capture,
                       evidence_retry_count, load_latest_probe, load_response_cursor, receipt,
                       request_events, request_was_submitted,
                       save_latest_response_capture, save_response, save_response_capture,
-                      save_latest_probe, submission_count)
+                      save_latest_probe, save_response_cursor, submission_count)
 from .workflow import (
     RECOVERY_ONLY_STATES, capabilities, configure_project, prepare_request,
     request_status, wait_status,
@@ -765,8 +765,48 @@ def retry_once_command(args: argparse.Namespace) -> int:
 
 
 def rollover_target_command(args: argparse.Namespace) -> int:
-    """Move one exhausted conversation aside and send the immutable request to its new registered target."""
+    """Create one same-Project successor after Chat proves the source is exhausted."""
+    root = Path(args.request_directory).resolve()
+    intent_path = root / "target-rollover.json"
     try:
+        if intent_path.exists():
+            intent = json.loads(intent_path.read_text(encoding="utf-8"))
+            if not isinstance(intent, dict) or intent.get("version") != 1:
+                raise ValidationError("invalid target-rollover.json")
+            target_url = intent.get("successor_url")
+            if not isinstance(target_url, str):
+                raise ValidationError(
+                    "a prior rollover stopped before a successor URL was proven; manual inspection is required"
+                )
+            request = load_request(root)
+            response_path = root / "response.txt"
+            exhausted_again = (request.chat_url == target_url and response_path.is_file()
+                               and is_conversation_exhausted(
+                                   response_path.read_text(encoding="utf-8-sig")))
+            if exhausted_again:
+                prior_archive = root / str(intent.get("archive_directory", ""))
+                if not prior_archive.is_dir():
+                    raise ValidationError("prior rollover archive is missing")
+                os.replace(intent_path, prior_archive / "target-rollover.json")
+            else:
+                commit_exhausted_conversation_rollover(
+                    intent["project_id"], intent["source_url"], target_url,
+                )
+                request = load_request(root)
+                baseline = intent.get("assistant_identities")
+                if not isinstance(baseline, list) or not all(isinstance(item, str) for item in baseline):
+                    raise ValidationError("rollover recovery is missing its response cursor")
+                save_response_cursor(request, set(baseline))
+                if submission_count(request) == 0:
+                    event(request, "target_rollover_authorized", phase="target_rollover",
+                          source_url=intent["source_url"], successor_url=target_url,
+                          archive_directory=intent["archive_directory"])
+                    event(request, "request_submitted", phase="submit", submission_attempt=1,
+                          target_rollover=True)
+                    receipt(request, "waiting_for_response",
+                            "Recovering the confirmed first turn in a same-Project successor chat")
+                return run_command(args)
+
         request = load_request(args.request_directory)
         response_path = request.directory / "response.txt"
         if not response_path.is_file() or not is_conversation_exhausted(
@@ -776,21 +816,94 @@ def rollover_target_command(args: argparse.Namespace) -> int:
         prior = json.loads((request.directory / "receipt.json").read_text(encoding="utf-8"))
         if (not isinstance(prior, dict) or prior.get("project_id") != request.project_id
                 or prior.get("request_id") != request.request_id
-                or prior.get("fingerprint") == request.fingerprint):
-            raise ValidationError("a confirmed target change is not proven")
+                or prior.get("fingerprint") != request.fingerprint
+                or prior.get("state") != "response_received"):
+            raise ValidationError("the exhausted response is not bound to the active target")
         prior_count = submission_count(request, total=True)
-        archive = archive_target_generation(request)
-        event(request, "target_rollover_authorized", phase="target_rollover",
-              prior_total_submission_count=prior_count,
-              prior_fingerprint=prior.get("fingerprint"),
-              active_fingerprint=request.fingerprint,
-              archive_directory=archive.name)
+        source_url = request.chat_url
+        queue, terminal = _wait_for_queue(request, None)
+        if terminal is not None:
+            return terminal
+        assert queue is not None
+        try:
+            with ChatSession(request, status_callback=lambda name, **values: _upload_status(request, name, **values)) as session:
+                session.prepare_successor_project_chat()
+                archive = archive_target_generation(request)
+                # _wait_for_queue wrote an active queue receipt. Preserve the
+                # original terminal receipt as the archived generation proof.
+                atomic_json(archive / "receipt.json", prior)
+                atomic_json(intent_path, {
+                    "version": 1, "phase": "prepared", "project_id": request.project_id,
+                    "request_id": request.request_id, "source_url": source_url,
+                    "source_fingerprint": request.fingerprint,
+                    "archive_directory": archive.name,
+                    "prior_total_submission_count": prior_count,
+                })
+                baseline = session.submit(build_prompt(request), request.attachments)
+                successor_url = session.wait_for_successor_url()
+                atomic_json(intent_path, {
+                    "version": 1, "phase": "submitted", "project_id": request.project_id,
+                    "request_id": request.request_id, "source_url": source_url,
+                    "source_fingerprint": request.fingerprint,
+                    "successor_url": successor_url,
+                    "archive_directory": archive.name,
+                    "prior_total_submission_count": prior_count,
+                    "assistant_identities": sorted(baseline),
+                })
+                commit_exhausted_conversation_rollover(request.project_id, source_url, successor_url)
+                active_request = load_request(args.request_directory)
+                save_response_cursor(active_request, baseline)
+                event(active_request, "target_rollover_authorized", phase="target_rollover",
+                      prior_total_submission_count=prior_count,
+                      prior_fingerprint=request.fingerprint,
+                      active_fingerprint=active_request.fingerprint,
+                      source_url=source_url, successor_url=successor_url,
+                      archive_directory=archive.name)
+                event(active_request, "request_submitted", phase="submit", submission_attempt=1,
+                      target_rollover=True)
+                receipt(active_request, "waiting_for_response",
+                        "Waiting for one completed reply in the same-Project successor chat",
+                        successor_url=successor_url)
+                outcome = _capture_response(
+                    session, active_request, baseline,
+                    time.monotonic() + active_request.workflow_window_seconds,
+                    legacy_recovery=False,
+                )
+        finally:
+            queue.complete()
+        if outcome == "response_captured":
+            outcome, body, values = _parse_captured_response(active_request)
+        else:
+            body, values = None, {}
+        if outcome == "response_received" and body is not None:
+            path = save_response(active_request, body)
+            receipt(active_request, "response_received",
+                    "A completed assistant reply was captured from the successor chat",
+                    response_path=str(path), successor_url=successor_url, **values)
+            event(active_request, "response_received", phase="complete",
+                  response_path=str(path), successor_url=successor_url, **values)
+            emit("response_received", ok=True, phase="complete",
+                 project_id=active_request.project_id, request_id=active_request.request_id,
+                 response_path=str(path), successor_url=successor_url)
+            return 0
+        detail = ("no completed assistant reply arrived before the workflow deadline"
+                  if outcome == "response_timeout" else
+                  str(values.get("protocol_detail", "successor reply was not usable")))
+        receipt(active_request, outcome, detail, successor_url=successor_url, **values)
+        event(active_request, outcome, phase="receive", detail=detail,
+              successor_url=successor_url, **values)
+        emit(outcome, ok=False, phase="receive", project_id=active_request.project_id,
+             request_id=active_request.request_id, detail=detail, successor_url=successor_url)
+        return 1
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
         emit("courier_target_rollover_refused", ok=False, phase="target_rollover",
              detail=str(exc), error_code="COURIER_TARGET_ROLLOVER_NOT_PROVEN")
         return 2
-    args.resend_once = False
-    return run_command(args)
+    except (BrowserError, OwnerBusy) as exc:
+        emit("courier_target_rollover_failed", ok=False, phase="target_rollover",
+             detail=str(exc), error_code="COURIER_TARGET_ROLLOVER_FAILED",
+             retry_allowed=False)
+        return 1
 
 
 def capture_latest_command(args: argparse.Namespace) -> int:

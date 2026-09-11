@@ -9,7 +9,9 @@ import subprocess
 import time
 from typing import Any, Callable
 
-from .model import Request, atomic_json, conversation_id_from_url, runtime_root
+from .model import (Request, atomic_json, chat_project_id_from_url,
+                    conversation_id_from_url, project_landing_url, runtime_root,
+                    same_chat_project)
 from .owner import OwnerBusy, OwnerLease, OwnerRecord, process_alive, read_owner, terminate_orphan_browser
 from .storage import save_response_cursor
 
@@ -675,6 +677,40 @@ class ChatSession:
             return self
         except Exception:
             self.close(); raise
+
+    def prepare_successor_project_chat(self) -> None:
+        """Open an empty chat in the source conversation's own Project."""
+        if self.page is None:
+            raise BrowserError("browser session is not open")
+        source_project = chat_project_id_from_url(self.request.chat_url)
+        landing = project_landing_url(self.request.chat_url)
+        if source_project is None or landing is None:
+            raise BrowserError("registered target is not a ChatGPT Project conversation")
+        self.page.goto(landing, wait_until="domcontentloaded", timeout=120000)
+        if chat_project_id_from_url(self.page.url) != source_project:
+            raise ChatConversationMismatch(
+                "ChatGPT navigation left the registered Project while preparing a successor chat; "
+                f"expected_project={source_project!r}; actual_url={self.page.url!r}"
+            )
+        dom = ChatDom(self.page)
+        dom.wait_for_composer()
+        dom.clear_owned_draft()
+
+    def wait_for_successor_url(self, timeout_seconds: float = 30.0) -> str:
+        """Return the durable conversation URL created by the first confirmed turn."""
+        if self.page is None:
+            raise BrowserError("browser session is not open")
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            candidate = self.page.url
+            if (conversation_id_from_url(candidate) is not None
+                    and same_chat_project(self.request.chat_url, candidate)
+                    and conversation_id_from_url(candidate) != conversation_id_from_url(self.request.chat_url)):
+                return candidate.split("?", 1)[0].split("#", 1)[0]
+            self.page.wait_for_timeout(250)
+        raise SubmissionUnconfirmed(
+            "the first successor turn was confirmed but its same-Project conversation URL was not established"
+        )
 
     def submit(self, text: str, files: tuple[Path, ...] = (), *, marker: str | None = None,
                include_empty_baseline: bool = False) -> set[str]:
