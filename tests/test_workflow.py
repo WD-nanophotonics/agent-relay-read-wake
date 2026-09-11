@@ -123,3 +123,28 @@ def test_status_rejects_stale_shared_chat_contention(tmp_path, monkeypatch):
     monkeypatch.setattr("chat_courier.workflow.time.time", lambda: 1500.0)
 
     assert request_status(request.directory)["contention_wait_active"] is False
+
+
+def test_status_preserves_rate_limit_cooldown_if_runner_exits(tmp_path, monkeypatch):
+    configured(tmp_path, monkeypatch)
+    prepared = prepare_request("TEST", "LIMIT-1", "hello")
+    request = load_request(prepared["request_directory"])
+    receipt(
+        request,
+        "chat_busy_waiting",
+        "temporary usage limit",
+        contention_reason="chat_rate_limited",
+        runner_pid=123,
+        wait_deadline_at=2000.0,
+        agent_action_required=False,
+        safe_next_action="wait_for_same_request",
+    )
+    monkeypatch.setattr("chat_courier.workflow.process_alive", lambda _pid: False)
+    monkeypatch.setattr("chat_courier.workflow.time.time", lambda: 1500.0)
+
+    value = request_status(request.directory)
+
+    assert value["state"] == "chat_busy_waiting"
+    assert value["contention_wait_active"] is True
+    assert value["agent_action_required"] is False
+    assert value["safe_next_action"] == "wait_for_same_request"

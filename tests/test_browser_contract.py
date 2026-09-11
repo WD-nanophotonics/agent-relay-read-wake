@@ -167,6 +167,25 @@ class BrowserContractTests(unittest.TestCase):
             def locator(self, _): return Locator()
         self.assertTrue(ChatDom(Page()).access_denied())
 
+    def test_rate_limit_detection_ignores_conversation_text(self):
+        class Locator:
+            def __init__(self, text="", messages=()):
+                self.text, self.messages = text, messages
+            def inner_text(self, **_): return self.text
+            def all_inner_texts(self): return list(self.messages)
+        class Page:
+            def __init__(self, banner=""):
+                self.banner = banner
+            def locator(self, selector):
+                if selector == "body":
+                    return Locator(f"User said: rate limit {self.banner}")
+                if selector == ChatDom.user_selector:
+                    return Locator(messages=("User said: rate limit",))
+                return Locator(messages=())
+
+        self.assertFalse(ChatDom(Page()).rate_limited())
+        self.assertTrue(ChatDom(Page("Too many requests. Try again later.")).rate_limited())
+
     def test_visible_editable_composer_outweighs_generic_login_labels(self):
         class Element:
             def __init__(self, *, visible=False, editable=False, text=""):

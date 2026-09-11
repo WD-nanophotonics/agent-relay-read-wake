@@ -211,8 +211,15 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
         within_wait = state == "chat_busy_reconnecting" or (
             isinstance(deadline, (int, float)) and time.time() <= deadline
         )
-        contention_wait_active = (
-            isinstance(runner_pid, int) and process_alive(runner_pid) and within_wait
+        rate_limit_cooldown = (
+            state == "chat_busy_waiting"
+            and receipt.get("contention_reason") == "chat_rate_limited"
+        )
+        contention_wait_active = bool(
+            within_wait and (
+                rate_limit_cooldown
+                or (isinstance(runner_pid, int) and process_alive(runner_pid))
+            )
         )
     return {
         "project_id": request.project_id, "request_id": request.request_id,

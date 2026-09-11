@@ -46,6 +46,10 @@ class ChatComposerNotReady(BrowserError):
         self.snapshot = snapshot or {}
 
 
+class ChatRateLimited(ChatComposerNotReady):
+    """ChatGPT explicitly reports a temporary usage/rate limit."""
+
+
 class SubmissionUnconfirmed(BrowserError):
     """Courier attempted Send but cannot prove whether ChatGPT accepted it."""
 
@@ -114,6 +118,11 @@ class ChatDom:
         "conversation not found",
         "unable to load conversation",
     )
+    rate_limit_text = (
+        "rate limit", "too many requests", "try again later",
+        "you've reached", "reached your limit", "usage limit",
+        "达到上限", "请求过多", "稍后再试", "使用上限",
+    )
 
     def __init__(self, page: Any): self.page = page
 
@@ -134,6 +143,7 @@ class ChatDom:
         except Exception as exc:
             sample["page_title_error"] = f"{type(exc).__name__}: {exc}"
         try:
+            sample["rate_limited"] = self.rate_limited()
             composer = self.composer()
             sample.update({
                 "visible": bool(composer.is_visible()),
@@ -150,6 +160,18 @@ class ChatDom:
         except Exception as exc:
             sample.update({"ready": False, "error": f"{type(exc).__name__}: {exc}"})
         return sample
+
+    def rate_limited(self) -> bool:
+        """Detect a UI limit notice without treating conversation text as UI state."""
+        try:
+            body = self.page.locator("body").inner_text(timeout=2000).lower()
+            for selector in (self.user_selector, self.assistant_selector):
+                for message in self.page.locator(selector).all_inner_texts():
+                    if message:
+                        body = body.replace(message.lower(), "")
+            return any(marker in body for marker in self.rate_limit_text)
+        except Exception:
+            return False
 
     def authentication_required(self) -> bool:
         """Detect the ChatGPT login wall without inspecting credentials."""
@@ -195,6 +217,12 @@ class ChatDom:
                 raise ChatAuthenticationRequired(
                     "selected Chrome profile is not logged in to ChatGPT; "
                     "sign in once in this profile, then retry"
+                )
+            if self.rate_limited():
+                snapshot = self.composer_health()
+                snapshot["rate_limited"] = True
+                raise ChatRateLimited(
+                    "ChatGPT reports a temporary rate or usage limit", snapshot
                 )
             last_sample = self.composer_health(focus=True)
             if last_sample.get("ready"):

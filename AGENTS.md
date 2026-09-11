@@ -122,6 +122,7 @@ authorization to edit either message after submission.
 | `chat_submission_unconfirmed` | Run `courier_reconcile` on the same immutable directory. Courier reads first and may use its one evidence-bound automatic resend; never create another request ID. |
 | `response_timeout`, `response_protocol_error`, or `response_ui_error` | Reconcile the same request. Courier archives a rejected capture and reads fresh Chat state instead of parsing the same bad file forever. |
 | `chat_busy_waiting` or `chat_busy_reconnecting` | The same registered Chat is generating or temporarily focus-contended. Courier checks every 10 seconds for at most 10 minutes and proceeds as soon as it is ready. This is healthy progress. |
+| `chat_busy_waiting` with `contention_reason=chat_rate_limited` | ChatGPT explicitly reported a temporary rate/usage limit. Courier performs no browser retry for 10 minutes, tells the Agent to wait on the same request, then reconnects once. The persisted cooldown remains authoritative if the runner exits. |
 | `chat_composer_not_ready` | The page is visible but cannot safely accept text and was not positively identified as active generation. Report the snapshot; do not infer conversation exhaustion or create a replacement Chat. |
 | `chat_auth_required`, `chat_access_denied`, `chat_target_mismatch`, `configuration_error`, or `browser_error` before submission | Stop and report the structured event. Do not change profile variables, create a new Chat, or route around Courier. |
 

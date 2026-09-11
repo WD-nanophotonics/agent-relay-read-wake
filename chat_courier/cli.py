@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import time
 
-from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
+from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatRateLimited, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root, same_chat_project
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
@@ -380,6 +380,8 @@ def _chat_contention_snapshot(exc: Exception) -> dict[str, object] | None:
     for snapshot in snapshots:
         if not isinstance(snapshot, dict):
             continue
+        if snapshot.get("rate_limited") is True:
+            return snapshot
         if snapshot.get("streaming") is True:
             return snapshot
         if (
@@ -396,17 +398,19 @@ def _chat_contention_snapshot(exc: Exception) -> dict[str, object] | None:
 
 def _wait_for_shared_chat(request, exc: Exception, attempt: int = 1) -> None:
     snapshot = _chat_contention_snapshot(exc) or {}
+    rate_limited = snapshot.get("rate_limited") is True
     contention_reason = (
-        "shared_chat_streaming"
-        if snapshot.get("streaming") is True
-        else "shared_chat_focus_contended"
+        "chat_rate_limited" if rate_limited else
+        "shared_chat_streaming" if snapshot.get("streaming") is True else
+        "shared_chat_focus_contended"
     )
+    wait_seconds = CHAT_CONTENTION_WAIT_SECONDS if rate_limited else CHAT_CONTENTION_POLL_SECONDS
     wait_started_at = time.time()
     values = {
         "contention_reason": contention_reason,
-        "wait_seconds": CHAT_CONTENTION_POLL_SECONDS,
+        "wait_seconds": wait_seconds,
         "wait_started_at": wait_started_at,
-        "wait_deadline_at": wait_started_at + CHAT_CONTENTION_POLL_SECONDS,
+        "wait_deadline_at": wait_started_at + wait_seconds,
         "runner_pid": os.getpid(),
         "reconnect_attempt": attempt,
         "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,
@@ -415,11 +419,18 @@ def _wait_for_shared_chat(request, exc: Exception, attempt: int = 1) -> None:
         "same_request_preserved": True,
         "composer_snapshot": snapshot,
     }
-    detail = (
-        "The registered Chat is currently generating another turn. Courier will wait "
-        f"check again in {CHAT_CONTENTION_POLL_SECONDS} seconds, for at most {CHAT_CONTENTION_WAIT_SECONDS // 60} minutes; "
-        "the Agent must not retry, replace, or escalate this request while Courier is waiting."
-    )
+    if rate_limited:
+        detail = (
+            "ChatGPT explicitly reports a temporary rate or usage limit. Courier will cool down "
+            f"for {CHAT_CONTENTION_WAIT_SECONDS // 60} minutes before one reconnect attempt; "
+            "the Agent must wait and must not retry, replace, recover, or escalate this request."
+        )
+    else:
+        detail = (
+            "The registered Chat is currently generating another turn. Courier will "
+            f"check again in {CHAT_CONTENTION_POLL_SECONDS} seconds, for at most {CHAT_CONTENTION_WAIT_SECONDS // 60} minutes; "
+            "the Agent must not retry, replace, or escalate this request while Courier is waiting."
+        )
     receipt(request, "chat_busy_waiting", detail, **values)
     event(request, "chat_busy_waiting", phase="contention_wait", detail=detail, **values)
     emit(
@@ -427,7 +438,7 @@ def _wait_for_shared_chat(request, exc: Exception, attempt: int = 1) -> None:
         project_id=request.project_id, request_id=request.request_id,
         detail=detail, **values,
     )
-    time.sleep(CHAT_CONTENTION_POLL_SECONDS)
+    time.sleep(wait_seconds)
     reconnect_values = {
         "contention_reason": contention_reason,
         "runner_pid": os.getpid(),
@@ -435,6 +446,7 @@ def _wait_for_shared_chat(request, exc: Exception, attempt: int = 1) -> None:
         "maximum_reconnect_attempts": CHAT_CONTENTION_RECONNECT_ATTEMPTS,
         "agent_action_required": False,
         "same_request_preserved": True,
+        "rate_limited": rate_limited,
     }
     receipt(
         request, "chat_busy_reconnecting",
@@ -469,11 +481,18 @@ def _run_after_queue(request, previous: dict | None, *, resend_once: bool = Fals
                                                 resend_once=resend_once)
                     break
                 except (ChatComposerNotReady, PreSubmissionError) as exc:
-                    if (_chat_contention_snapshot(exc) is None
-                            or contention_reconnects >= CHAT_CONTENTION_RECONNECT_ATTEMPTS):
+                    snapshot = _chat_contention_snapshot(exc)
+                    rate_limited = bool(snapshot and snapshot.get("rate_limited") is True)
+                    if (snapshot is None or (
+                            not rate_limited
+                            and contention_reconnects >= CHAT_CONTENTION_RECONNECT_ATTEMPTS)):
                         raise
-                    contention_reconnects += 1
-                    _wait_for_shared_chat(request, exc, contention_reconnects)
+                    if not rate_limited:
+                        contention_reconnects += 1
+                    _wait_for_shared_chat(
+                        request, exc,
+                        1 if rate_limited else contention_reconnects,
+                    )
                 except OwnerBusy as exc:
                     if not submitted:
                         raise BrowserError(str(exc)) from exc

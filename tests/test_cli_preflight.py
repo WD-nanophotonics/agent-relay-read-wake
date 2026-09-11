@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, PreSubmissionError
+from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, ChatRateLimited, PreSubmissionError
 from chat_courier.cli import _capture_response, _parse_captured_response, _run_after_queue, _run_session_once, emit, main
 from chat_courier.model import ValidationError, load_request
 from chat_courier.owner import OwnerRecord
@@ -320,6 +320,42 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(waiting["safe_next_action"], "wait_for_same_request")
         self.assertEqual(reconnecting["reconnect_attempt"], 1)
         self.assertTrue(reconnecting["same_request_preserved"])
+
+    def test_rate_limit_waits_ten_minutes_before_one_reconnect(self):
+        calls = []
+
+        def run_once(*_args, **_kwargs):
+            calls.append("connect")
+            if len(calls) == 1:
+                raise ChatRateLimited(
+                    "temporary usage limit",
+                    {"rate_limited": True, "streaming": False, "ready": False},
+                )
+            return "response_timeout"
+
+        with tempfile.TemporaryDirectory() as value, patch(
+            "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+        ), patch("chat_courier.cli._run_session_once", side_effect=run_once), patch(
+            "chat_courier.cli.time.sleep"
+        ) as sleep:
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = _run_after_queue(request, None)
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["connect", "connect"])
+        sleep.assert_called_once_with(600)
+        waiting = next(item for item in events if item["event"] == "chat_busy_waiting")
+        reconnecting = next(item for item in events if item["event"] == "chat_busy_reconnecting")
+        self.assertEqual(waiting["contention_reason"], "chat_rate_limited")
+        self.assertEqual(waiting["wait_seconds"], 600)
+        self.assertFalse(waiting["agent_action_required"])
+        self.assertEqual(waiting["safe_next_action"], "wait_for_same_request")
+        self.assertTrue(reconnecting["rate_limited"])
+        self.assertEqual(reconnecting["reconnect_attempt"], 1)
 
     def test_non_streaming_composer_failure_does_not_wait_or_reconnect(self):
         with tempfile.TemporaryDirectory() as value, patch(

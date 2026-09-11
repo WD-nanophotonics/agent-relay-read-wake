@@ -104,6 +104,12 @@ composer is ready. The Agent must not
 retry, replace, or escalate the request while Courier reports this bounded
 wait. Other composer failures retain the existing fail-closed behavior.
 
+An explicit ChatGPT rate/usage-limit notice uses the same healthy waiting
+contract with `contention_reason=chat_rate_limited`, but Courier performs no
+browser check for 600 seconds and then reconnects once. The receipt preserves
+the cooldown deadline even if the runner exits, so callers continue waiting on
+the same request instead of starting a recovery/retry loop.
+
 Courier accepts an assistant reply only after its identity and text are stable,
 the streaming indicator is absent, and the composer has become actionable
 again. A stable-looking reply while the composer is still unavailable is an
