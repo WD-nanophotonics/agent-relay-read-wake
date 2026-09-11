@@ -73,6 +73,29 @@ class BrowserContractTests(unittest.TestCase):
         self.assertEqual(turn.text, "reply")
         self.assertEqual(clock.value, 2.0)
 
+    def test_stable_turn_waits_until_composer_is_ready(self):
+        class Clock:
+            value = 0.0
+            def __call__(self): return self.value
+        class Page:
+            def __init__(self, clock): self.clock = clock
+            def wait_for_timeout(self, milliseconds): self.clock.value += milliseconds / 1000
+        class Owner:
+            def update(self, _): pass
+        class Dom:
+            def __init__(self, clock): self.clock = clock
+            def assistant_turns(self): return [type("Turn", (), {"identity": "a1", "text": "reply", "index": 1})()]
+            def streaming(self): return False
+            def ready_for_next_turn(self): return self.clock.value >= 4.0
+        with tempfile.TemporaryDirectory() as value:
+            clock = Clock(); session = object.__new__(ChatSession)
+            session.page = Page(clock); session.owner = Owner()
+            session.request = type("Request", (), {"directory": Path(value), "project_id": "P", "request_id": "P-1"})()
+            with patch("chat_courier.browser.ChatDom", return_value=Dom(clock)), patch("chat_courier.browser.time.monotonic", side_effect=clock):
+                turn = session.wait_for_reply(set(), 10)
+        self.assertEqual(turn.text, "reply")
+        self.assertEqual(clock.value, 6.0)
+
     def test_reply_timeout_records_dom_detection_evidence(self):
         class Clock:
             value = 0.0

@@ -70,7 +70,9 @@ class ConversationSession:
                 lifecycle_stable = 0
             else:
                 lifecycle_stable += 1
-            if dom.streaming():
+            is_streaming = dom.streaming()
+            composer_ready = dom.ready_for_next_turn()
+            if is_streaming:
                 generation_seen = True
                 previous = None
                 stable = lifecycle_stable = 0
@@ -81,6 +83,11 @@ class ConversationSession:
             # below still prevent progressing while the image is rendering.
             turns = [turn for turn in dom.assistant_turns(include_empty=True) if turn.identity not in baseline]
             if turns:
+                if not composer_ready:
+                    previous = None
+                    stable = lifecycle_stable = 0
+                    self._session.page.wait_for_timeout(1000)
+                    continue
                 latest = turns[-1]
                 sample = (latest.identity, latest.text)
                 stable = stable + 1 if sample == previous else 1
@@ -100,7 +107,7 @@ class ConversationSession:
                 # a detectable Stop control.  The signature covers DOM size,
                 # text length, and visual element state; three quiet samples
                 # plus a restored composer make this a completion transition.
-                if (generation_seen or page_activity_seen) and dom.ready_for_next_turn():
+                if (generation_seen or page_activity_seen) and composer_ready:
                     if lifecycle_stable >= 3:
                         return ConversationReply(f"visual:{marker}", "", self._new_page_assets(media_before))
                 else:

@@ -94,6 +94,11 @@ once. It emits `chat_busy_reconnecting` before that attempt. The Agent must not
 retry, replace, or escalate the request while Courier reports this bounded
 wait. Other composer failures retain the existing fail-closed behavior.
 
+Courier accepts an assistant reply only after its identity and text are stable,
+the streaming indicator is absent, and the composer has become actionable
+again. A stable-looking reply while the composer is still unavailable is an
+in-progress response phase, not permission to send the next request.
+
 Courier also checks that Chrome's final URL has the exact registered ChatGPT
 conversation ID. A redirect to the ChatGPT home/new-chat page produces
 `chat_target_mismatch`, while a visible “You don't have access” page produces

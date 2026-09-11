@@ -909,17 +909,23 @@ class ChatSession:
             else:
                 raise BrowserError("reply wait requires a durable cursor or an outbound user-turn anchor")
             is_streaming = dom.streaming()
+            composer_ready = dom.ready_for_next_turn()
             last_snapshot = {
                 "assistant_turn_count": len(all_turns), "candidate_count": len(turns),
                 "anchor_found": anchor_found, "streaming": is_streaming,
-                "composer_ready": dom.ready_for_next_turn(), "sample_count": sample_count,
+                "composer_ready": composer_ready, "sample_count": sample_count,
             }
             if sample_count == 1 or sample_count % 5 == 0:
                 atomic_json(self.request.directory / "response-diagnostic.json", {
                     "version": 1, "project_id": self.request.project_id, "request_id": self.request.request_id,
                     "state": "waiting", "captured_at": time.time(), **last_snapshot,
                 })
-            if turns and not is_streaming:
+            # A temporarily absent streaming indicator is not proof that the
+            # assistant turn is complete. ChatGPT can pause between response
+            # phases while the composer remains unavailable. Requiring the
+            # composer to become actionable prevents the next Courier request
+            # from interrupting that still-active response.
+            if turns and not is_streaming and composer_ready:
                 latest = turns[-1]; sample = (latest.identity, latest.text)
                 stable = stable + 1 if sample == previous else 1; previous = sample
                 if stable >= 3: return latest
