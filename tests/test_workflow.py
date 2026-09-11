@@ -80,3 +80,46 @@ def test_post_submission_browser_close_remains_same_request_recoverable(tmp_path
     assert value["state"] == "courier_error"
     assert value["terminal"] is False
     assert value["recovery_only_required"] is True
+
+
+def test_status_proves_live_shared_chat_contention(tmp_path, monkeypatch):
+    configured(tmp_path, monkeypatch)
+    prepared = prepare_request("TEST", "BUSY-1", "hello")
+    request = load_request(prepared["request_directory"])
+    receipt(
+        request,
+        "chat_busy_waiting",
+        "shared Chat is streaming",
+        runner_pid=123,
+        wait_deadline_at=2000.0,
+        agent_action_required=False,
+        safe_next_action="wait_for_same_request",
+    )
+    monkeypatch.setattr("chat_courier.workflow.process_alive", lambda pid: pid == 123)
+    monkeypatch.setattr("chat_courier.workflow.time.time", lambda: 1500.0)
+
+    value = request_status(request.directory)
+
+    assert value["state"] == "chat_busy_waiting"
+    assert value["contention_wait_active"] is True
+    assert value["agent_action_required"] is False
+    assert value["safe_next_action"] == "wait_for_same_request"
+
+
+def test_status_rejects_stale_shared_chat_contention(tmp_path, monkeypatch):
+    configured(tmp_path, monkeypatch)
+    prepared = prepare_request("TEST", "BUSY-STALE-1", "hello")
+    request = load_request(prepared["request_directory"])
+    receipt(
+        request,
+        "chat_busy_waiting",
+        "shared Chat was streaming",
+        runner_pid=123,
+        wait_deadline_at=1000.0,
+        agent_action_required=False,
+        safe_next_action="wait_for_same_request",
+    )
+    monkeypatch.setattr("chat_courier.workflow.process_alive", lambda _pid: True)
+    monkeypatch.setattr("chat_courier.workflow.time.time", lambda: 1500.0)
+
+    assert request_status(request.directory)["contention_wait_active"] is False

@@ -10,6 +10,7 @@ from typing import Any
 
 from .locking import RuntimeLock
 from .model import IDENTIFIER, ValidationError, _load_registry, atomic_json, load_request, runtime_root
+from .owner import process_alive
 from .storage import load_receipt, request_was_submitted
 
 PROJECTS_SCHEMA = "chat-courier-projects-v1"
@@ -202,6 +203,16 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
     state = receipt.get("state") if receipt else "prepared"
     recovery_only = (state in RECOVERY_ONLY_STATES
                      or (state in {"browser_error", "courier_error"} and request_was_submitted(request)))
+    contention_wait_active = False
+    if receipt and state in {"chat_busy_waiting", "chat_busy_reconnecting"}:
+        runner_pid = receipt.get("runner_pid")
+        deadline = receipt.get("wait_deadline_at")
+        within_wait = state == "chat_busy_reconnecting" or (
+            isinstance(deadline, (int, float)) and time.time() <= deadline
+        )
+        contention_wait_active = (
+            isinstance(runner_pid, int) and process_alive(runner_pid) and within_wait
+        )
     return {
         "project_id": request.project_id, "request_id": request.request_id,
         "request_directory": str(request.directory), "state": state,
@@ -209,6 +220,9 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
         "recovery_only_required": recovery_only,
         "response_path": str(request.directory / "response.txt") if state == "response_received" else None,
         "fingerprint": request.fingerprint,
+        "contention_wait_active": contention_wait_active,
+        "agent_action_required": receipt.get("agent_action_required") if receipt else None,
+        "safe_next_action": receipt.get("safe_next_action") if receipt else None,
     }
 
 
