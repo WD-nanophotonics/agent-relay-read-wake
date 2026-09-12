@@ -295,13 +295,14 @@ def ledger_reply(request: Request) -> dict[str, Any] | None:
     try: ledger = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): return None
     if ledger.get("payload_fingerprint") != _payload_id(request): return None
-    rejected = {str(item.get("assistant_identity")) for item in request_events(request)
+    rejected = {(str(item.get("assistant_identity")), str(item.get("raw_sha256")))
+                for item in request_events(request)
                 if item.get("event") in {"response_protocol_error", "response_ui_error"}
-                and item.get("assistant_identity")}
+                and item.get("assistant_identity") and item.get("raw_sha256")}
     exact = []; positional = []
     for message in ledger.get("messages", []):
         if not isinstance(message, dict) or message.get("role") != "assistant": continue
-        if str(message.get("identity")) in rejected: continue
+        if (str(message.get("identity")), str(message.get("text_sha256"))) in rejected: continue
         if (request.request_id in message.get("request_ids", [])
                 and "CHAT_COURIER_REPLY/1" in str(message.get("text", ""))):
             exact.append(message)

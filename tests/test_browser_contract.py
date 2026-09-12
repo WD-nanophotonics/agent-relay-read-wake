@@ -277,6 +277,70 @@ class BrowserContractTests(unittest.TestCase):
         self.assertEqual(snapshot["messages"][1]["in_reply_to_request_id"], "P-1")
         self.assertIsNone(snapshot["messages"][3]["in_reply_to_request_id"])
 
+    def test_conflicting_final_reply_uses_native_regenerate_without_resending(self):
+        class EmptyControls:
+            def count(self): return 0
+            def nth(self, _index): raise AssertionError("no control")
+
+        class Control:
+            def __init__(self, page): self.page = page
+            def is_visible(self): return True
+            def is_enabled(self): return True
+            def click(self, **_kwargs):
+                self.page.nodes[1].text = (
+                    "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=P-2\n"
+                    "BEGIN_RESPONSE\nnew\nEND_RESPONSE"
+                )
+
+        class Controls:
+            def __init__(self, control): self.control = control
+            def count(self): return 1
+            def nth(self, _index): return self.control
+
+        class Node:
+            def __init__(self, page, role, text, identity):
+                self.page, self.role, self.text, self.identity = page, role, text, identity
+            def inner_text(self): return self.text
+            def get_attribute(self, name):
+                return {"data-message-author-role": self.role,
+                        "data-message-id": self.identity}.get(name)
+            def hover(self, **_kwargs): pass
+            def locator(self, selector):
+                if selector == ChatDom.regenerate_selectors[0]:
+                    return Controls(Control(self.page))
+                return EmptyControls()
+
+        class Conversation:
+            def __init__(self, nodes): self.nodes = nodes
+            def count(self): return len(self.nodes)
+            def nth(self, index): return self.nodes[index]
+
+        class Page:
+            def __init__(self):
+                self.nodes = [Node(self, "user", "REQUEST_ID=P-2", "u2")]
+                self.nodes.append(Node(
+                    self, "assistant",
+                    "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=P-1\n"
+                    "BEGIN_RESPONSE\nold\nEND_RESPONSE", "a1",
+                ))
+            def locator(self, selector):
+                if "data-message-author-role" in selector:
+                    return Conversation(self.nodes)
+                return EmptyControls()
+            def wait_for_timeout(self, _milliseconds): pass
+
+        dom = ChatDom(Page())
+        dom.streaming = lambda: False
+        dom.ready_for_next_turn = lambda: True
+        intents = []
+        result = dom.regenerate_conflicting_reply(
+            "REQUEST_ID=P-2", "P-2", before_click=intents.append,
+        )
+        self.assertEqual(result["method"], "page_native_regenerate")
+        self.assertEqual(result["scope"], "assistant_turn")
+        self.assertEqual(result["conflicting_request_ids"], ["P-1"])
+        self.assertEqual(len(intents), 1)
+
     def test_auth_url_remains_authoritative_even_if_composer_is_visible(self):
         class Composer:
             @property

@@ -6,10 +6,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 
-from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatRateLimited, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
+from .browser import BrowserError, ChatAccessDenied, ChatAuthenticationRequired, ChatComposerNotReady, ChatConversationMismatch, ChatDom, ChatRateLimited, ChatSession, PreSubmissionError, ProfileConfigurationError, SubmissionUnconfirmed
 from .owner import OwnerBusy, process_alive, read_owner
 from .model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, ValidationError, atomic_json, commit_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, propose_url_registration, runtime_root, same_chat_project
 from .protocol import REPLY_PROTOCOL, build_prompt, is_chat_ui_error, is_conversation_exhausted, parse_reply
@@ -1228,6 +1229,188 @@ def capture_latest_command(args: argparse.Namespace) -> int:
          project_id=request.project_id, request_id=request.request_id, **values)
     return 0
 
+
+def _latest_conflicting_envelope(request) -> dict[str, object] | None:
+    """Return a proven post-request reply envelope that names another request."""
+    manifest_path = request.directory / "latest-response-capture.json"
+    raw_path = request.directory / "latest-response.raw.txt"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        text = raw_path.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        manifest = None
+    if (isinstance(manifest, dict)
+            and manifest.get("project_id") == request.project_id
+            and manifest.get("request_id") == request.request_id
+            and manifest.get("payload_fingerprint") == request.payload_fingerprint
+            and manifest.get("latest_user_turn_found") is True
+            and manifest.get("post_submission_reply_found") is True
+            and manifest.get("raw_path") == raw_path.name
+            and manifest.get("raw_sha256") == hashlib.sha256(text.encode("utf-8")).hexdigest()
+            and REPLY_PROTOCOL in text):
+        request_ids = sorted(set(re.findall(
+            r"REQUEST_ID=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})", text,
+        )))
+        if request_ids and request.request_id not in request_ids:
+            return {
+                "assistant_identity": manifest.get("assistant_identity"),
+                "raw_sha256": manifest.get("raw_sha256"),
+                "conflicting_request_ids": request_ids,
+                "evidence_source": "latest_response_capture",
+            }
+
+    # A rejected identity is intentionally omitted from later capture results,
+    # but the append-only conversation ledger still retains the observed fact.
+    # Use it only when the current request anchor and conflicting assistant turn
+    # are the final two conversation turns in an idle, ready Chat.
+    ledger_path = request.directory / "conversation-ledger.json"
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    messages = ledger.get("messages", []) if isinstance(ledger, dict) else []
+    if (ledger.get("project_id") != request.project_id
+            or ledger.get("request_id") != request.request_id
+            or ledger.get("payload_fingerprint") != request.payload_fingerprint
+            or ledger.get("streaming") is not False
+            or ledger.get("composer_ready") is not True
+            or not isinstance(messages, list)
+            or len(messages) < 2):
+        return None
+    user, assistant = messages[-2], messages[-1]
+    if (not isinstance(user, dict) or not isinstance(assistant, dict)
+            or user.get("role") != "user"
+            or request.request_id not in user.get("request_ids", [])
+            or assistant.get("role") != "assistant"):
+        return None
+    text = str(assistant.get("text", ""))
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    request_ids = sorted(set(re.findall(
+        r"REQUEST_ID=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})", text,
+    )))
+    if (REPLY_PROTOCOL not in text or not request_ids
+            or request.request_id in request_ids
+            or assistant.get("text_sha256") != digest):
+        return None
+    return {
+        "assistant_identity": assistant.get("identity"),
+        "raw_sha256": digest,
+        "conflicting_request_ids": request_ids,
+        "evidence_source": "conversation_ledger",
+    }
+
+
+def _regenerate_conflicting_envelope_once(request, conflict: dict[str, object]) -> int:
+    """Repair one terminal wrong-ID reply with one bounded Chat-side action."""
+    prior = [item for item in request_events(request)
+             if item.get("event") in {"response_regeneration_click_intent",
+                                      "conflicting_reply_recovery_resend_intent"}]
+    if prior:
+        receipt(request, "request_frozen",
+                "The one page-native response regeneration was already attempted or became uncertain",
+                agent_action_required=True, safe_next_action="notify_supervisor")
+        event(request, "response_regeneration_refused", phase="reconcile",
+              reason="regeneration_budget_consumed")
+        emit("response_regeneration_refused", ok=False, phase="reconcile",
+             project_id=request.project_id, request_id=request.request_id,
+             retry_allowed=False, reason="regeneration_budget_consumed")
+        return 1
+
+    archive_response_capture(request, max(1, evidence_retry_count(request) + 1))
+    intent = {
+        "assistant_identity": conflict.get("assistant_identity"),
+        "raw_sha256": conflict.get("raw_sha256"),
+        "conflicting_request_ids": conflict.get("conflicting_request_ids"),
+        "same_user_request_preserved": True,
+        "maximum_attempts": 1,
+    }
+    event(request, "response_regeneration_intent", phase="reconcile", **intent)
+    receipt(request, "response_regeneration_intent",
+            "A conflicting reply envelope will be regenerated once without resending the user request",
+            **intent)
+    emit("response_regeneration_intent", ok=True, phase="reconcile",
+         project_id=request.project_id, request_id=request.request_id, **intent)
+    try:
+        with ChatSession(request, recovery=True) as session:
+            def before_click(values: dict[str, object]) -> None:
+                event(request, "response_regeneration_click_intent", phase="reconcile", **values)
+                receipt(request, "response_regeneration_click_intent",
+                        "Courier is about to click one page-native regenerate control", **values)
+            action = ChatDom(session.page).regenerate_conflicting_reply(
+                f"REQUEST_ID={request.request_id}", request.request_id,
+                before_click=before_click,
+            )
+    except (ValidationError, OwnerBusy, BrowserError) as exc:
+        # If no native action crossed its click boundary, use one explicit
+        # recovery turn.  It repeats the same logical request ID, labels the
+        # stale envelope, and never mutates the immutable request directory.
+        clicked = any(item.get("event") == "response_regeneration_click_intent"
+                      for item in request_events(request))
+        native_control_unavailable = (
+            isinstance(exc, BrowserError)
+            and str(exc).startswith("no unambiguous page-native regenerate control")
+        )
+        if native_control_unavailable and not clicked:
+            recovery_prompt = (
+                "CHAT_COURIER_RECOVERY_NOTICE/1\n"
+                f"PROJECT_ID={request.project_id}\n"
+                f"REQUEST_ID={request.request_id}\n"
+                "The immediately preceding assistant reply used a stale REQUEST_ID and was rejected. "
+                "This is the same logical request, not a new work order. Ignore that stale reply and "
+                "answer the exact request below using the required current REQUEST_ID envelope.\n\n"
+                + build_prompt(request)
+            )
+            recovery_values = {
+                "conflicting_request_ids": conflict.get("conflicting_request_ids"),
+                "same_logical_request": True,
+                "maximum_attempts": 1,
+            }
+            event(request, "conflicting_reply_recovery_resend_intent",
+                  phase="reconcile", **recovery_values)
+            receipt(request, "conflicting_reply_recovery_resend_intent",
+                    "Courier will send one labeled recovery turn for the same logical request",
+                    **recovery_values)
+            emit("conflicting_reply_recovery_resend_intent", ok=True, phase="reconcile",
+                 project_id=request.project_id, request_id=request.request_id,
+                 **recovery_values)
+            try:
+                with ChatSession(request, recovery=True) as session:
+                    session.submit(recovery_prompt, ())
+            except (ValidationError, OwnerBusy, BrowserError) as resend_exc:
+                receipt(request, "request_frozen",
+                        f"The one labeled recovery turn could not be proven submitted: {resend_exc}",
+                        agent_action_required=True, safe_next_action="notify_supervisor")
+                event(request, "conflicting_reply_recovery_resend_failed",
+                      phase="reconcile", detail=str(resend_exc))
+                emit("conflicting_reply_recovery_resend_failed", ok=False, phase="reconcile",
+                     project_id=request.project_id, request_id=request.request_id,
+                     retry_allowed=False, detail=str(resend_exc))
+                return 1
+            event(request, "conflicting_reply_recovery_resend_submitted",
+                  phase="reconcile", **recovery_values)
+            receipt(request, "waiting_for_response",
+                    "One labeled recovery turn was submitted for the same logical request",
+                    **recovery_values)
+            emit("conflicting_reply_recovery_resend_submitted", ok=True, phase="reconcile",
+                 project_id=request.project_id, request_id=request.request_id,
+                 **recovery_values)
+            return run_command(argparse.Namespace(request_directory=str(request.directory)))
+        receipt(request, "request_frozen",
+                f"The single page-native regeneration could not be proven safe or complete: {exc}",
+                agent_action_required=True, safe_next_action="notify_supervisor")
+        event(request, "response_regeneration_failed", phase="reconcile", detail=str(exc))
+        emit("response_regeneration_failed", ok=False, phase="reconcile",
+             project_id=request.project_id, request_id=request.request_id,
+             retry_allowed=False, detail=str(exc))
+        return 1
+    event(request, "response_regeneration_started", phase="reconcile", **action)
+    receipt(request, "waiting_for_response",
+            "ChatGPT started one page-native regeneration for the same immutable user request",
+            **action)
+    emit("response_regeneration_started", ok=True, phase="reconcile",
+         project_id=request.project_id, request_id=request.request_id, **action)
+    return run_command(argparse.Namespace(request_directory=str(request.directory)))
+
 def reconcile_command(args: argparse.Namespace) -> int:
     """Converge one immutable request from durable transport facts."""
     try:
@@ -1275,6 +1458,10 @@ def reconcile_command(args: argparse.Namespace) -> int:
         except ValidationError: refreshed = None
         if refreshed and refreshed.get("state") == "response_received":
             return 0
+
+        conflict = _latest_conflicting_envelope(request)
+        if conflict is not None:
+            return _regenerate_conflicting_envelope_once(request, conflict)
 
         if state == "submission_unconfirmed" and captured != 0:
             path = request.directory / "absence-observations.json"

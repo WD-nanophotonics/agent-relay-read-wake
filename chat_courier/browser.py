@@ -106,6 +106,34 @@ class ChatDom:
         "button:has-text('Stop generating'), button:has-text('停止生成')"
     )
     send_selectors = ("button[data-testid='send-button']", "button[aria-label*='Send']", "button[aria-label*='发送']")
+    regenerate_selectors = (
+        "button[data-testid='regenerate-response-button']",
+        "button[aria-label='Regenerate response']",
+        "button[aria-label='Regenerate']",
+        "button[aria-label='Try again']",
+        "button[aria-label='Retry']",
+        "button[aria-label='重新生成']",
+        "button[aria-label='重试']",
+        "button:has-text('Regenerate')",
+        "button:has-text('Try again')",
+        "button:has-text('Retry')",
+        "button:has-text('重新生成')",
+        "button:has-text('重试')",
+    )
+    more_action_selectors = (
+        "button[data-testid='more-turn-action-button']",
+        "button[aria-label='More actions']",
+        "button[aria-label='More']",
+        "button[aria-label='更多操作']",
+        "button[aria-label='更多']",
+    )
+    regenerate_menu_selectors = (
+        "[role='menuitem']:has-text('Regenerate')",
+        "[role='menuitem']:has-text('Try again')",
+        "[role='menuitem']:has-text('Retry')",
+        "[role='menuitem']:has-text('重新生成')",
+        "[role='menuitem']:has-text('重试')",
+    )
     auth_selectors = (
         "a[href*='/auth/login']",
         "button:has-text('Continue with Google')",
@@ -472,6 +500,143 @@ class ChatDom:
                 except Exception: continue
                 result.append(AssistantTurn(identity, text, index))
         return anchor_found, result
+
+    def regenerate_conflicting_reply(self, marker: str, expected_request_id: str, *,
+                                     before_click: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        """Regenerate one terminal assistant turn that names the wrong request.
+
+        This is deliberately narrower than resubmission: the exact Courier user
+        turn must exist, its immediately following assistant turn must be the
+        final conversation turn, and that reply must contain a Courier envelope
+        for a different request ID.  Only a page-native regenerate/retry control
+        is used, so the immutable user request is never typed or sent again.
+        """
+        history_deadline = time.monotonic() + 30
+        found = False; turns: list[AssistantTurn] = []
+        while time.monotonic() < history_deadline:
+            found, turns = self.assistant_turns_after_user_marker(marker)
+            if found and turns:
+                break
+            self.page.wait_for_timeout(250)
+        if not found or not turns:
+            raise BrowserError("the exact Courier request has no assistant reply to regenerate")
+        if self.streaming() or not self.ready_for_next_turn():
+            raise BrowserError("ChatGPT is not idle and ready for response regeneration")
+        turn = turns[-1]
+        request_ids = set(re.findall(
+            r"REQUEST_ID=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})", turn.text,
+        ))
+        if "CHAT_COURIER_REPLY/1" not in turn.text or not request_ids:
+            raise BrowserError("the latest assistant turn is not a conflicting Courier envelope")
+        if expected_request_id in request_ids:
+            raise BrowserError("the latest assistant turn already names the expected request")
+
+        conversation = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
+        if turn.index != conversation.count() - 1:
+            raise BrowserError("a later conversation turn exists; refusing to regenerate an older reply")
+        node = conversation.nth(turn.index)
+        try:
+            node.hover(timeout=5000)
+        except Exception:
+            pass
+
+        attempts: list[dict[str, Any]] = []
+        for scope_name, scope in (("assistant_turn", node), ("page", self.page)):
+            for selector in self.regenerate_selectors:
+                try:
+                    controls = scope.locator(selector)
+                    visible = [controls.nth(index) for index in range(controls.count())
+                               if controls.nth(index).is_visible() and controls.nth(index).is_enabled()]
+                    if len(visible) != 1:
+                        attempts.append({"scope": scope_name, "selector": selector,
+                                         "visible_enabled_count": len(visible)})
+                        continue
+                    click_intent = {
+                        "selector": selector, "scope": scope_name,
+                        "assistant_identity": turn.identity,
+                        "raw_sha256": hashlib.sha256(turn.text.encode("utf-8")).hexdigest(),
+                    }
+                    if before_click is not None:
+                        before_click(click_intent)
+                    visible[0].click(timeout=5000)
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        current_found, current_turns = self.assistant_turns_after_user_marker(marker)
+                        current = current_turns[-1] if current_found and current_turns else None
+                        if (self.streaming() or not self.ready_for_next_turn()
+                                or current is None or current.text != turn.text):
+                            return {
+                                "method": "page_native_regenerate", "scope": scope_name,
+                                "selector": selector, "prior_assistant_identity": turn.identity,
+                                "prior_text_sha256": hashlib.sha256(turn.text.encode("utf-8")).hexdigest(),
+                                "conflicting_request_ids": sorted(request_ids),
+                            }
+                        self.page.wait_for_timeout(250)
+                    raise BrowserError("regenerate control was clicked but no response-state change was observed")
+                except BrowserError:
+                    raise
+                except Exception as exc:
+                    attempts.append({"scope": scope_name, "selector": selector,
+                                     "error": f"{type(exc).__name__}: {exc}"})
+
+        # Current ChatGPT builds may place Regenerate/Retry inside the final
+        # response's overflow menu instead of exposing a direct action button.
+        for menu_scope, menu_root in (("assistant_turn_menu", node),
+                                      ("final_assistant_global_menu", self.page)):
+          for selector in self.more_action_selectors:
+            try:
+                controls = menu_root.locator(selector)
+                visible = [controls.nth(index) for index in range(controls.count())
+                           if controls.nth(index).is_visible() and controls.nth(index).is_enabled()]
+                selected = (visible[0] if len(visible) == 1 else
+                            visible[-1] if menu_scope == "final_assistant_global_menu" and visible else None)
+                if selected is None:
+                    attempts.append({"scope": menu_scope, "selector": selector,
+                                     "visible_enabled_count": len(visible)})
+                    continue
+                selected.click(timeout=5000)
+                self.page.wait_for_timeout(250)
+                for item_selector in self.regenerate_menu_selectors:
+                    items = self.page.locator(item_selector)
+                    menu_items = [items.nth(index) for index in range(items.count())
+                                  if items.nth(index).is_visible() and items.nth(index).is_enabled()]
+                    if len(menu_items) != 1:
+                        attempts.append({"scope": "response_action_menu", "selector": item_selector,
+                                         "visible_enabled_count": len(menu_items)})
+                        continue
+                    click_intent = {
+                        "selector": item_selector, "scope": "response_action_menu",
+                        "assistant_identity": turn.identity,
+                        "raw_sha256": hashlib.sha256(turn.text.encode("utf-8")).hexdigest(),
+                    }
+                    if before_click is not None:
+                        before_click(click_intent)
+                    menu_items[0].click(timeout=5000)
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        current_found, current_turns = self.assistant_turns_after_user_marker(marker)
+                        current = current_turns[-1] if current_found and current_turns else None
+                        if (self.streaming() or not self.ready_for_next_turn()
+                                or current is None or current.text != turn.text):
+                            return {
+                                "method": "page_native_regenerate", "scope": "response_action_menu",
+                                "selector": item_selector, "prior_assistant_identity": turn.identity,
+                                "prior_text_sha256": hashlib.sha256(turn.text.encode("utf-8")).hexdigest(),
+                                "conflicting_request_ids": sorted(request_ids),
+                            }
+                        self.page.wait_for_timeout(250)
+                    raise BrowserError("regenerate menu action did not start a new response")
+                self.page.keyboard.press("Escape")
+            except BrowserError:
+                raise
+            except Exception as exc:
+                attempts.append({"scope": menu_scope, "selector": selector,
+                                 "error": f"{type(exc).__name__}: {exc}"})
+
+        raise BrowserError(
+            "no unambiguous page-native regenerate control was available for the conflicting reply; "
+            f"attempts={attempts}"
+        )
 
     def conversation_snapshot(self, limit: int = 20) -> dict[str, Any]:
         """Return a mechanical recent-turn ledger with request ownership."""
@@ -1029,9 +1194,10 @@ class ChatSession:
         if self.page is None: raise BrowserError("browser session is not open")
         dom = ChatDom(self.page); previous: tuple[str, str] | None = None; stable = 0
         last_snapshot: dict[str, Any] = {}; sample_count = 0
-        rejected_identities = {str(item.get("assistant_identity")) for item in request_events(self.request)
-                               if item.get("event") in {"response_protocol_error", "response_ui_error"}
-                               and item.get("assistant_identity")}
+        rejected_captures = {(str(item.get("assistant_identity")), str(item.get("raw_sha256")))
+                             for item in request_events(self.request)
+                             if item.get("event") in {"response_protocol_error", "response_ui_error"}
+                             and item.get("assistant_identity") and item.get("raw_sha256")}
         while time.monotonic() < deadline:
             sample_count += 1
             self.owner.update("waiting_for_response")
@@ -1056,7 +1222,9 @@ class ChatSession:
             if envelope_turns:
                 turns = envelope_turns
                 anchor_found = True
-            turns = [turn for turn in turns if turn.identity not in rejected_identities]
+            turns = [turn for turn in turns
+                     if (turn.identity, hashlib.sha256(turn.text.encode("utf-8")).hexdigest())
+                     not in rejected_captures]
             is_streaming = dom.streaming()
             composer_ready = dom.ready_for_next_turn()
             snapshotter = getattr(dom, "latest_message_snapshot", None)

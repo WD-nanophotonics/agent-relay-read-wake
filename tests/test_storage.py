@@ -7,16 +7,116 @@ import unittest
 from unittest.mock import patch
 
 from chat_courier.model import MAX_INLINE_MESSAGE_BYTES, ValidationError, load_request
+from chat_courier.browser import BrowserError
 from chat_courier.storage import (event, load_receipt, load_response_capture, load_response_cursor,
                                   ensure_target_binding, ledger_reply, merge_conversation_ledger,
                                   receipt, request_events, save_latest_probe, save_response, save_response_capture,
-                                  save_response_cursor, submission_count)
-from chat_courier.cli import (_safe_pre_browser_turn_recovery, _submission_confirmed,
+                                  save_latest_response_capture, save_response_cursor, submission_count)
+from chat_courier.cli import (_latest_conflicting_envelope, _regenerate_conflicting_envelope_once,
+                              _safe_pre_browser_turn_recovery, _submission_confirmed,
                               reconcile_command, resend_once_command, retry_once_command,
                               rollover_target_command)
 
 
 class StorageTests(unittest.TestCase):
+    def test_wrong_id_reply_falls_back_to_one_labeled_same_request_turn(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            submitted: list[str] = []
+            case = self
+
+            class Session:
+                def __init__(self, *_args, **_kwargs): self.page = object()
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+                def submit(self, prompt, attachments):
+                    case.assertEqual(attachments, ())
+                    submitted.append(prompt)
+
+            conflict = {
+                "assistant_identity": "a-old",
+                "raw_sha256": "deadbeef",
+                "conflicting_request_ids": ["P-OLD"],
+            }
+            with patch("chat_courier.cli.ChatSession", Session), \
+                    patch("chat_courier.cli.ChatDom.regenerate_conflicting_reply",
+                          side_effect=BrowserError(
+                              "no unambiguous page-native regenerate control was available for the conflicting reply"
+                          )), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(_regenerate_conflicting_envelope_once(request, conflict), 0)
+
+            self.assertEqual(len(submitted), 1)
+            self.assertIn("CHAT_COURIER_RECOVERY_NOTICE/1", submitted[0])
+            self.assertIn("REQUEST_ID=P-1", submitted[0])
+            self.assertIn("This is the same logical request", submitted[0])
+            self.assertEqual(run.call_count, 1)
+            events = request_events(request)
+            self.assertEqual(sum(item.get("event") == "conflicting_reply_recovery_resend_intent"
+                                 for item in events), 1)
+            self.assertEqual(sum(item.get("event") == "conflicting_reply_recovery_resend_submitted"
+                                 for item in events), 1)
+
+    def test_wrong_id_reply_does_not_resend_for_unrelated_browser_error(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+
+            class Session:
+                def __init__(self, *_args, **_kwargs): self.page = object()
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+
+            with patch("chat_courier.cli.ChatSession", Session), \
+                    patch("chat_courier.cli.ChatDom.regenerate_conflicting_reply",
+                          side_effect=BrowserError("ChatGPT is not idle")):
+                result = _regenerate_conflicting_envelope_once(request, {
+                    "assistant_identity": "a-old", "raw_sha256": "deadbeef",
+                    "conflicting_request_ids": ["P-OLD"],
+                })
+
+            self.assertEqual(result, 1)
+            self.assertFalse(any(item.get("event") == "conflicting_reply_recovery_resend_intent"
+                                 for item in request_events(request)))
+
+    def test_latest_conflicting_envelope_is_exact_and_hash_bound(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            text = (
+                "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=P-OLD\n"
+                "BEGIN_RESPONSE\nstale\nEND_RESPONSE"
+            )
+            save_latest_response_capture(
+                request, identity="a-old", index=3, text=text, user_turn_found=True,
+            )
+            conflict = _latest_conflicting_envelope(request)
+            self.assertEqual(conflict["assistant_identity"], "a-old")
+            self.assertEqual(conflict["conflicting_request_ids"], ["P-OLD"])
+
+            (request.directory / "latest-response.raw.txt").write_text(
+                text + "tampered", encoding="utf-8",
+            )
+            self.assertIsNone(_latest_conflicting_envelope(request))
+
+    def test_latest_conflicting_envelope_survives_rejected_capture_via_ledger(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            text = (
+                "CHAT_COURIER_REPLY/1\nPROJECT_ID=P\nREQUEST_ID=P-OLD\n"
+                "BEGIN_RESPONSE\nstale\nEND_RESPONSE"
+            )
+            merge_conversation_ledger(request, {"message_count": 2, "messages": [
+                {"ordinal": 0, "role": "user", "identity": "u-new",
+                 "text": "REQUEST_ID=P-1", "text_sha256": "user",
+                 "request_ids": ["P-1"]},
+                {"ordinal": 1, "role": "assistant", "identity": "a-old",
+                 "text": text,
+                 "text_sha256": __import__("hashlib").sha256(text.encode("utf-8")).hexdigest(),
+                 "request_ids": ["P-OLD"]},
+            ]}, streaming=False, composer_ready=True, session_id="ledger")
+            conflict = _latest_conflicting_envelope(request)
+            self.assertEqual(conflict["evidence_source"], "conversation_ledger")
+            self.assertEqual(conflict["conflicting_request_ids"], ["P-OLD"])
+
     def test_reconcile_uses_two_absence_observations_once_then_freezes_uncertainty(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value); request = self.request(root)

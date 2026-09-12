@@ -220,7 +220,13 @@ ChatCourier asks ChatGPT to include `CHAT_COURIER_REPLY/1`, the project ID,
 and request ID. Completed DOM observations are merged into
 `conversation-ledger.json`; partial history never replaces older evidence.
 Exact envelope ownership outranks message order, and the response cursor is
-only a performance hint. The response body is saved verbatim as `response.txt`. ChatGPT
+only a performance hint. If the final assistant turn after the exact request is
+a Courier envelope for a different request ID, reconciliation may use ChatGPT's
+page-native regenerate control once. This preserves the immutable user turn and
+submission count. If that control is unavailable, Courier may instead send one
+clearly labeled recovery turn carrying the same logical request ID and immutable
+payload; a second or uncertain recovery attempt freezes only that request.
+The response body is saved verbatim as `response.txt`. ChatGPT
 may choose task difficulty and instruction detail; the two optional request
 fields express only the local Agent's preference.
 
