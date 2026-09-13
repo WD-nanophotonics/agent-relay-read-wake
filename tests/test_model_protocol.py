@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import threading
@@ -196,6 +197,23 @@ class ModelProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as value:
             prompt = build_prompt(self.make_request(Path(value)))
             self.assertNotIn("MEPHC THIN FLOW REPLY CONTRACT", prompt)
+
+    def test_genericchess_prompt_enforces_mainline_priority_without_creating_audit_work(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = replace(self.make_request(Path(value)), project_id="GENERICCHESS")
+            prompt = build_prompt(request)
+            mechanical = prompt[:prompt.index("BEGIN QUOTED LOCAL AGENT REQUEST")]
+            self.assertIn("GENERICCHESS MAINLINE PRIORITY CONTRACT", mechanical)
+            self.assertIn("MAINLINE_WORK=true or MAINLINE_WORK=false", mechanical)
+            self.assertIn("preceding four work orders", mechanical)
+            self.assertIn("MAINLINE_DRIFT_WARNING=true", mechanical)
+            self.assertIn("do not issue another peripheral order", mechanical)
+            self.assertIn("not a reason to create another audit", mechanical)
+
+    def test_non_genericchess_prompt_does_not_receive_mainline_contract(self):
+        with tempfile.TemporaryDirectory() as value:
+            prompt = build_prompt(self.make_request(Path(value)))
+            self.assertNotIn("GENERICCHESS MAINLINE PRIORITY CONTRACT", prompt)
 
     def test_attachment_cannot_escape_directory(self):
         with tempfile.TemporaryDirectory() as value:
