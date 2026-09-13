@@ -968,16 +968,28 @@ class ChatSession:
                 )
             self.page.wait_for_timeout(1000)
             dom = ChatDom(self.page)
-            hrefs = self.page.locator("a[href]").evaluate_all(
-                "nodes => nodes.map(node => node.href).filter(Boolean)"
+            links = self.page.locator("a[href]").evaluate_all(
+                "nodes => nodes.map(node => ({href: node.href, text: node.innerText || ''}))"
+                ".filter(value => value.href)"
             )
             candidates = []
-            for href in hrefs:
+            for link in links:
+                href = link.get("href") if isinstance(link, dict) else None
                 if (not isinstance(href, str) or href in checked
                         or not same_chat_project(self.request.chat_url, href)
                         or conversation_id_from_url(href) == conversation_id_from_url(self.request.chat_url)):
                     continue
-                candidates.append(href.split("?", 1)[0].split("#", 1)[0])
+                candidate = href.split("?", 1)[0].split("#", 1)[0]
+                candidates.append(candidate)
+                # Project conversation cards include a server-rendered preview.
+                # This is durable same-Project evidence even when opening the
+                # conversation is temporarily rate-limited or partially loaded.
+                if marker in str(link.get("text", "")):
+                    matches.add(candidate)
+            if len(matches) == 1:
+                return next(iter(matches))
+            if len(matches) > 1:
+                raise BrowserError("multiple same-Project successor chats contain the request marker")
             for candidate in dict.fromkeys(candidates):
                 checked.add(candidate)
                 self.page.goto(candidate, wait_until="domcontentloaded", timeout=120000)
@@ -998,7 +1010,7 @@ class ChatSession:
                     "rate limit", "too many requests", "try again later",
                     "you've reached", "reached your limit", "达到上限", "请求过多",
                 )),
-                "link_count": len(hrefs),
+                "link_count": len(links),
                 "same_project_candidate_count": len(checked),
                 "checked_urls": sorted(checked),
                 "match_count": len(matches),
