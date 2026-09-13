@@ -60,8 +60,15 @@ def chat_project_id_from_url(value: object) -> str | None:
     except ValueError: return None
     if parsed.scheme != "https" or parsed.hostname not in {"chatgpt.com", "www.chatgpt.com"} or parsed.username or parsed.password or parsed.port: return None
     parts = [part for part in parsed.path.split("/") if part]
-    if len(parts) >= 4 and parts[-4] == "g" and parts[-2] == "c": return parts[-3]
-    if len(parts) >= 3 and parts[-3] == "g" and parts[-1] == "project": return parts[-2]
+    project = None
+    if len(parts) >= 4 and parts[-4] == "g" and parts[-2] == "c": project = parts[-3]
+    if len(parts) >= 3 and parts[-3] == "g" and parts[-1] == "project": project = parts[-2]
+    if project is not None:
+        # ChatGPT may append a human-readable slug to the stable Project ID in
+        # conversation links (g-p-<32 hex>-<slug>).  Identity must use only
+        # the stable ID so a UI-generated slug does not look like a new Project.
+        match = re.match(r"^(g-p-[0-9a-fA-F]{32})(?:-|$)", project)
+        return match.group(1).lower() if match else project
     return None
 
 def project_landing_url(value: object) -> str | None:

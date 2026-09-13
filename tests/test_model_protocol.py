@@ -30,6 +30,15 @@ class ModelProtocolTests(unittest.TestCase):
                          "https://chatgpt.com/g/g-p-other/c/new"))
         self.assertIsNone(project_landing_url("https://chatgpt.com/c/plain"))
 
+    def test_project_identity_ignores_ui_conversation_slug(self):
+        stable = "g-p-6a7b04f7e3d08191b57f29305e5c673b"
+        source = f"https://chatgpt.com/g/{stable}/c/old"
+        slugged = f"https://chatgpt.com/g/{stable}-generic-chess/c/new"
+        self.assertEqual(chat_project_id_from_url(slugged), stable)
+        self.assertTrue(same_chat_project(source, slugged))
+        self.assertEqual(project_landing_url(slugged),
+                         f"https://chatgpt.com/g/{stable}/project")
+
     def test_rollover_registration_is_atomic_idempotent_and_rejects_other_project(self):
         with tempfile.TemporaryDirectory() as value, \
                 patch("chat_courier.model.runtime_root", return_value=Path(value)):
