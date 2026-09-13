@@ -940,6 +940,7 @@ def rollover_target_command(args: argparse.Namespace) -> int:
     intent_path = root / "target-rollover.json"
     basis = getattr(args, "basis", "verified_context_capacity")
     user_direct = basis == "user_direct"
+    prepared_retry_authorized = bool(getattr(args, "prepared_retry_authorized", False))
     try:
         if intent_path.exists():
             intent = json.loads(intent_path.read_text(encoding="utf-8"))
@@ -955,17 +956,66 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 assert queue is not None
                 try:
                     with ChatSession(request, inspect_project=True) as session:
-                        target_url = session.recover_successor_url(request.request_id)
+                        retry_sent = False
+                        try:
+                            target_url = session.recover_successor_url(request.request_id)
+                        except BrowserError:
+                            if not prepared_retry_authorized:
+                                raise
+                            if any(
+                                value.get("event") == "target_rollover_prepared_retry_authorized"
+                                for value in request_events(request)
+                            ):
+                                raise ValidationError(
+                                    "prepared rollover retry budget is exhausted"
+                                )
+                            diagnostic_path = root / "rollover-recovery-diagnostic.json"
+                            try:
+                                diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+                            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                                raise ValidationError(
+                                    "prepared rollover retry is missing its read-only absence diagnostic"
+                                ) from exc
+                            if (not isinstance(diagnostic, dict)
+                                    or diagnostic.get("match_count") != 0
+                                    or diagnostic.get("authentication_required") is not False
+                                    or diagnostic.get("access_denied") is not False
+                                    or diagnostic.get("rate_limited") is not False
+                                    or not same_chat_project(intent["source_url"],
+                                                             str(diagnostic.get("page_url", "")))):
+                                raise ValidationError(
+                                    "prepared rollover retry lacks a clean same-Project absence observation"
+                                )
+                            event(request, "target_rollover_prepared_retry_authorized",
+                                  phase="target_rollover", basis=intent.get("basis"),
+                                  duplicate_risk_accepted=True,
+                                  diagnostic_path=str(diagnostic_path))
+                            session.prepare_successor_project_chat()
+                            recovery_prompt = (
+                                "CHAT_COURIER_ROLLOVER_RECOVERY_NOTICE/1\n"
+                                f"PROJECT_ID={request.project_id}\n"
+                                f"REQUEST_ID={request.request_id}\n"
+                                "The prior successor creation was interrupted before its URL was proven. "
+                                "This is an explicitly authorized retry of the same logical request, not a new "
+                                "work order. If an equivalent turn is already visible, treat this copy as the "
+                                "authoritative continuation and do not duplicate project work.\n\n"
+                                + build_prompt(request)
+                            )
+                            baseline = session.submit(recovery_prompt, request.attachments)
+                            target_url = session.wait_for_successor_url()
+                            retry_sent = True
                 finally:
                     queue.complete()
-                baseline = load_response_cursor(request)
-                if baseline is None:
-                    raise ValidationError("rollover recovery is missing its response cursor")
+                if not retry_sent:
+                    baseline = load_response_cursor(request)
+                    if baseline is None:
+                        raise ValidationError("rollover recovery is missing its response cursor")
                 intent = {
                     **intent,
                     "phase": "submitted",
                     "successor_url": target_url,
                     "assistant_identities": sorted(baseline),
+                    "prepared_retry_authorized": retry_sent,
                 }
                 atomic_json(intent_path, intent)
             request = load_request(root)
@@ -990,7 +1040,12 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 if not isinstance(baseline, list) or not all(isinstance(item, str) for item in baseline):
                     raise ValidationError("rollover recovery is missing its response cursor")
                 save_response_cursor(request, set(baseline))
-                if submission_count(request) == 0:
+                rollover_recorded = any(
+                    value.get("event") == "target_rollover_authorized"
+                    and value.get("successor_url") == target_url
+                    for value in request_events(request)
+                )
+                if not rollover_recorded:
                     event(request, "target_rollover_authorized", phase="target_rollover",
                           source_url=intent["source_url"], successor_url=target_url,
                           archive_directory=intent.get("archive_directory"),
@@ -1595,6 +1650,8 @@ def main(argv: list[str] | None = None) -> int:
     rollover.add_argument("request_directory")
     rollover.add_argument("--basis", choices=["verified_context_capacity", "user_direct"],
                           default="verified_context_capacity")
+    rollover.add_argument("--prepared-retry-authorized", action="store_true",
+                          help="retry one prepared rollover after read-only same-Project absence proof")
     rollover.set_defaults(handler=rollover_target_command)
     capture_latest = sub.add_parser("courier_capture_latest", help="capture the latest completed assistant reply without sending")
     capture_latest.add_argument("request_directory"); capture_latest.set_defaults(handler=capture_latest_command)

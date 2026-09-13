@@ -61,6 +61,18 @@ If ChatGPT confirms the first turn before exposing the final URL, the same
 rollover command recovers by locating that unique request marker in the source
 Project. This recovery is read-only and does not submit again.
 
+If an interrupted rollover remains in `prepared` state and that read-only
+search proves that no matching turn exists, a registered Supervisor or an
+explicit current user instruction can authorize one tagged recovery send:
+
+```powershell
+& .\scripts\chat-courier.cmd courier_rollover_target .\request --prepared-retry-authorized
+```
+
+This preserves the original request identity and same-Project/same-profile
+constraints. The option is fail-closed without the clean diagnostic and cannot
+be used a second time.
+
 Prepare a request directory containing `request.json`, `message.txt`, and any
 explicitly listed files under `attachments/`. Agents must use the bundled
 Windows command launcher, which forces the repository source root and reports the

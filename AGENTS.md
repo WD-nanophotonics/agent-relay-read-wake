@@ -220,6 +220,17 @@ interrupted before Courier proves the successor URL, do not try again: inspect
 rollover with a proven successor URL only resumes that same successor; it does
 not create another Chat.
 
+After that escalation, a registered Supervisor or an explicit current user
+instruction may accept the bounded duplicate risk and authorize exactly one
+recovery send with `--prepared-retry-authorized`. Courier first performs its
+normal read-only successor search. It sends only when the persisted diagnostic
+shows no matching request, no authentication/access/rate-limit fault, and the
+same ChatGPT Project. The retry preserves the original `REQUEST_ID`, is tagged
+as a rollover recovery rather than a new work order, and exhausts the retry
+budget even if the process is interrupted again. Subsequent recovery is
+read-only or requires human resolution; it never creates another request ID,
+browser, or profile.
+
 An explicit current user instruction to replace an exhausted conversation may
 instead authorize `courier_rollover_target <fresh-handoff-request-dir> --basis
 user_direct`. This form accepts either a fresh request or exactly one confirmed

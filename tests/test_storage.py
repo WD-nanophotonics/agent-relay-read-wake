@@ -519,6 +519,76 @@ class StorageTests(unittest.TestCase):
             self.assertTrue((root / "target-generation-1" / "response.txt").is_file())
             self.assertEqual((root / "response.txt").read_text(encoding="utf-8"), "continued")
 
+    def test_prepared_rollover_can_retry_once_after_explicit_authority_and_absence_proof(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            (root / "message.txt").write_text("immutable closeout", encoding="utf-8")
+            (root / "request.json").write_text(json.dumps({
+                "version": 1, "project_id": "P", "request_id": "P-1",
+            }), encoding="utf-8")
+            old_url = "https://chatgpt.com/g/g-p-project/c/old"
+            new_url = "https://chatgpt.com/g/g-p-project/c/new"
+            with patch("chat_courier.model._load_registry", return_value={"P": old_url}):
+                old_request = load_request(root)
+            with patch("chat_courier.model._load_registry", return_value={"P": new_url}):
+                active_request = load_request(root)
+            event(old_request, "request_submitted", phase="submit", submission_attempt=1)
+            (root / "target-generation-1").mkdir()
+            (root / "target-rollover.json").write_text(json.dumps({
+                "version": 1,
+                "phase": "prepared",
+                "project_id": "P",
+                "request_id": "P-1",
+                "source_url": old_url,
+                "source_fingerprint": old_request.fingerprint,
+                "archive_directory": "target-generation-1",
+                "basis": "verified_context_capacity",
+                "prior_total_submission_count": 1,
+            }), encoding="utf-8")
+            (root / "rollover-recovery-diagnostic.json").write_text(json.dumps({
+                "page_url": "https://chatgpt.com/g/g-p-project/project",
+                "authentication_required": False,
+                "access_denied": False,
+                "rate_limited": False,
+                "match_count": 0,
+            }), encoding="utf-8")
+            submitted: list[str] = []
+
+            class Session:
+                def __init__(self, *_args, **_kwargs): pass
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def recover_successor_url(self, _marker):
+                    raise BrowserError("no successor marker")
+                def prepare_successor_project_chat(self): pass
+                def submit(self, prompt, _attachments):
+                    submitted.append(prompt)
+                    return {"baseline"}
+                def wait_for_successor_url(self): return new_url
+
+            class Queue:
+                def complete(self): pass
+
+            args = type("Args", (), {
+                "request_directory": str(root),
+                "basis": "verified_context_capacity",
+                "prepared_retry_authorized": True,
+            })()
+            with patch("chat_courier.cli.load_request",
+                       side_effect=[old_request, active_request, active_request]), \
+                    patch("chat_courier.cli.ChatSession", Session), \
+                    patch("chat_courier.cli._wait_for_queue", return_value=(Queue(), None)), \
+                    patch("chat_courier.cli.commit_conversation_rollover"), \
+                    patch("chat_courier.cli.run_command", return_value=0):
+                self.assertEqual(rollover_target_command(args), 0)
+            self.assertEqual(len(submitted), 1)
+            self.assertIn("CHAT_COURIER_ROLLOVER_RECOVERY_NOTICE/1", submitted[0])
+            self.assertEqual(submission_count(active_request), 1)
+            self.assertTrue(any(
+                value.get("event") == "target_rollover_prepared_retry_authorized"
+                for value in request_events(active_request)
+            ))
+
     def test_user_direct_rollover_requires_and_uses_fresh_handoff_request(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
