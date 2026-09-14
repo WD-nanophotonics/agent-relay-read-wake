@@ -689,6 +689,7 @@ class StorageTests(unittest.TestCase):
                   safe_to_retry_same_request=True)
             receipt(request, "submission_not_started", "composer remained busy",
                     safe_to_retry_same_request=True)
+            receipt(request, "queue_turn_acquired", "failed rollover replaced the receipt")
 
             class Session:
                 profile = Path("profile")

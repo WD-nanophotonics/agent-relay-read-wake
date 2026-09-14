@@ -1064,9 +1064,12 @@ def rollover_target_command(args: argparse.Namespace) -> int:
             prior = load_receipt(request)
             pristine = prior is None and not events and prior_count == 0
             proven_unsent = (
-                prior_count == 0 and prior is not None
-                and prior.get("state") == "submission_not_started"
-                and prior.get("safe_to_retry_same_request") is True
+                prior_count == 0
+                and any(
+                    value.get("event") == "submission_not_started"
+                    and value.get("safe_to_retry_same_request") is True
+                    for value in events
+                )
                 and not any(value.get("event") in {
                     "request_submitted", "chat_submission_unconfirmed",
                     "response_received",
