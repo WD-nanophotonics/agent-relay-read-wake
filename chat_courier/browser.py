@@ -817,12 +817,13 @@ class ChatDom:
 class ChatSession:
     """One owned browser process, page, and Playwright connection per run."""
     def __init__(self, request: Request, *, recovery: bool = False, prepare_only: bool = False,
-                 inspect_project: bool = False,
+                 inspect_project: bool = False, require_composer: bool = True,
                  status_callback: Callable[..., None] | None = None):
         self.request = request; self.process: subprocess.Popen | None = None
         self.recovery = recovery
         self.prepare_only = prepare_only
         self.inspect_project = inspect_project
+        self.require_composer = require_composer
         self.status_callback = status_callback
         self.session_id = secrets.token_hex(12)
         self.attached_existing = False
@@ -891,7 +892,8 @@ class ChatSession:
                 raise OwnerBusy("live Courier has not published a usable CDP port yet")
             try:
                 self._connect(existing.cdp_port, existing=True)
-                ChatDom(self.page).wait_for_composer()
+                if self.require_composer:
+                    ChatDom(self.page).wait_for_composer()
                 return self
             except Exception:
                 self.close()
@@ -907,7 +909,8 @@ class ChatSession:
             if self.inspect_project:
                 return self
             dom = ChatDom(self.page)
-            dom.wait_for_composer()
+            if self.require_composer:
+                dom.wait_for_composer()
             if not self.prepare_only and not self.recovery:
                 dom.clear_owned_draft()
             return self

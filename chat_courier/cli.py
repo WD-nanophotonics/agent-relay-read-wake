@@ -1224,7 +1224,10 @@ def capture_latest_command(args: argparse.Namespace) -> int:
                  post_submission_reply_found=False, live_owner_found=True,
                  submission_count=probe["submission_count"], message_sent=False)
             return 1
-        with ChatSession(request, recovery=True) as session:
+        # Read-only capture must be able to inspect a request while Chat is
+        # still generating. Composer readiness is a send gate, not a read
+        # prerequisite; wait_for_reply records the streaming/busy evidence.
+        with ChatSession(request, recovery=True, require_composer=False) as session:
             candidate = session.wait_for_reply(
                 None, time.monotonic() + min(int(getattr(args, "timeout", 60)), request.workflow_window_seconds),
                 after_user_marker=f"REQUEST_ID={request.request_id}",

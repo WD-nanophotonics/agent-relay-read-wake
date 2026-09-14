@@ -127,13 +127,16 @@ class CliPreflightTests(unittest.TestCase):
 
     def test_capture_latest_is_read_only_and_parses_after_window_close(self):
         lifecycle = []
+        composer_requirements = []
         def offline_parse(*_args):
             self.assertEqual(lifecycle[-1], "closed")
             raise ValidationError("header mismatch")
         class Session:
-            def __init__(self, request, *, recovery=False):
+            def __init__(self, request, *, recovery=False, require_composer=True):
                 self.request = request
                 self.recovery = recovery
+                self.require_composer = require_composer
+                composer_requirements.append(require_composer)
             def __enter__(self):
                 self.assert_recovery = self.recovery
                 lifecycle.append("opened"); return self
@@ -156,6 +159,7 @@ class CliPreflightTests(unittest.TestCase):
         self.assertFalse(result["message_sent"])
         self.assertFalse(result["request_match"])
         self.assertEqual(result["event"], "courier_latest_response_captured")
+        self.assertEqual(composer_requirements, [False])
 
     def test_capture_latest_refuses_a_live_courier_owner(self):
         owner = OwnerRecord("P", "P-1", 1234, "nonce", "waiting", "now")
@@ -171,7 +175,9 @@ class CliPreflightTests(unittest.TestCase):
 
     def test_capture_latest_empty_persists_exact_user_anchor_evidence(self):
         class Session:
-            def __init__(self, request, *, recovery=False): self.request = request
+            def __init__(self, request, *, recovery=False, require_composer=True):
+                self.request = request
+                self.require_composer = require_composer
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def wait_for_reply(self, baseline, deadline, *, after_user_marker=None):
@@ -197,7 +203,9 @@ class CliPreflightTests(unittest.TestCase):
 
     def test_capture_latest_adopts_matching_reply_and_reconciles_queue(self):
         class Session:
-            def __init__(self, request, *, recovery=False): self.request = request
+            def __init__(self, request, *, recovery=False, require_composer=True):
+                self.request = request
+                self.require_composer = require_composer
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def wait_for_reply(self, *_args, **_kwargs):
