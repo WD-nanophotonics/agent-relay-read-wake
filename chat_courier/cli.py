@@ -1063,6 +1063,15 @@ def rollover_target_command(args: argparse.Namespace) -> int:
             prior_count = submission_count(request, total=True)
             prior = load_receipt(request)
             pristine = prior is None and not events and prior_count == 0
+            proven_unsent = (
+                prior_count == 0 and prior is not None
+                and prior.get("state") == "submission_not_started"
+                and prior.get("safe_to_retry_same_request") is True
+                and not any(value.get("event") in {
+                    "request_submitted", "chat_submission_unconfirmed",
+                    "response_received",
+                } for value in events)
+            )
             confirmed_pending = (
                 prior_count == 1 and prior is not None
                 and prior.get("state") in {
@@ -1073,9 +1082,10 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                     "chat_submission_unconfirmed", "response_received",
                 } for value in events)
             )
-            if response_path.exists() or not (pristine or confirmed_pending):
+            if response_path.exists() or not (pristine or proven_unsent or confirmed_pending):
                 raise ValidationError(
-                    "user-direct rollover requires a fresh request or one confirmed pending submission"
+                    "user-direct rollover requires a fresh request, a proven-unsent request, "
+                    "or one confirmed pending submission"
                 )
         else:
             if not response_path.is_file() or not is_conversation_exhausted(
