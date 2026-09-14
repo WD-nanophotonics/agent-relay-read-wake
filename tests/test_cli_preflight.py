@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_courier.browser import AssistantTurn, ChatAuthenticationRequired, ChatComposerNotReady, ChatRateLimited, PreSubmissionError
-from chat_courier.cli import _capture_response, _parse_captured_response, _run_after_queue, _run_session_once, emit, main
+from chat_courier.cli import _capture_response, _parse_captured_response, _run_after_queue, _run_session_once, _wait_for_queue, emit, main
 from chat_courier.model import ValidationError, load_request
 from chat_courier.owner import OwnerRecord
 from chat_courier.queue import QueueStatus
@@ -463,6 +463,32 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(receipt["state"], "queue_timeout")
         self.assertTrue(receipt["safe_to_retry_same_request"])
         self.assertFalse(receipt["browser_started"])
+
+    def test_submitted_event_reclaims_its_own_dead_queue_head(self):
+        observed = []
+
+        class Queue:
+            def __init__(self, request):
+                self.request = request
+            def join(self, *, allow_active_recovery=False):
+                observed.append(allow_active_recovery)
+                return QueueStatus("recovery_rejoined", ticket="ticket-1", position=1)
+            def poll(self):
+                return QueueStatus("turn_acquired", ticket="ticket-1", position=1)
+
+        with tempfile.TemporaryDirectory() as value, \
+                patch("chat_courier.cli.CourierQueue", Queue), \
+                patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            root.joinpath("events.jsonl").write_text(
+                json.dumps({"event": "request_submitted"}) + "\n", encoding="utf-8"
+            )
+            queue, terminal = _wait_for_queue(request, {"state": "queue_recovery_required"})
+
+        self.assertIsNone(terminal)
+        self.assertIsNotNone(queue)
+        self.assertEqual(observed, [True])
 
     def test_pre_browser_keyboard_interrupt_is_structured_and_releases_ticket(self):
         class Queue:

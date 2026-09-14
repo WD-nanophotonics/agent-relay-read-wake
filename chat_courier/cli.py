@@ -593,8 +593,12 @@ def _wait_for_queue(request, previous: dict | None, *, evidence_retry: bool = Fa
     """Join one durable FIFO ticket and wait without touching Chrome."""
     queue = CourierQueue(request)
     try:
-        status = queue.join(allow_active_recovery=(evidence_retry or _submission_confirmed(previous)
-                                                   or _safe_pre_browser_turn_recovery(previous, request)))
+        status = queue.join(allow_active_recovery=(
+            evidence_retry
+            or _submission_confirmed(previous)
+            or request_was_submitted(request)
+            or _safe_pre_browser_turn_recovery(previous, request)
+        ))
     except (QueueIntegrityError, RuntimeError, OSError) as exc:
         receipt(request, "configuration_error", str(exc))
         emit("configuration_error", ok=False, phase="queue", project_id=request.project_id, request_id=request.request_id, detail=str(exc))
