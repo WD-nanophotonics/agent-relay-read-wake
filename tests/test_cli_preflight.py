@@ -13,6 +13,7 @@ from chat_courier.cli import _capture_response, _parse_captured_response, _run_a
 from chat_courier.model import ValidationError, load_request
 from chat_courier.owner import OwnerRecord
 from chat_courier.queue import QueueStatus
+from chat_courier.storage import event
 
 
 class CliPreflightTests(unittest.TestCase):
@@ -481,9 +482,7 @@ class CliPreflightTests(unittest.TestCase):
                 patch("chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}):
             root = self.request_directory(Path(value))
             request = load_request(root)
-            root.joinpath("events.jsonl").write_text(
-                json.dumps({"event": "request_submitted"}) + "\n", encoding="utf-8"
-            )
+            event(request, "request_submitted", phase="submit", submission_attempt=1)
             queue, terminal = _wait_for_queue(request, {"state": "queue_recovery_required"})
 
         self.assertIsNone(terminal)

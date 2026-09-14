@@ -1091,6 +1091,7 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 prior_count == 1 and prior is not None
                 and prior.get("state") in {
                     "waiting_for_response", "response_timeout", "queue_recovery_required",
+                    "chat_busy_waiting", "chat_busy_reconnecting",
                 }
                 and sum(value.get("event") == "request_submitted" for value in events) == 1
                 and not any(value.get("event") in {

@@ -647,7 +647,7 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(submission_count(request), 1)
             self.assertFalse((root / "target-generation-1").exists())
 
-    def test_user_direct_rollover_archives_one_confirmed_pending_submission(self):
+    def test_user_direct_rollover_archives_one_confirmed_busy_submission(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
             (root / "message.txt").write_text("handoff", encoding="utf-8")
@@ -659,7 +659,8 @@ class StorageTests(unittest.TestCase):
             with patch("chat_courier.model._load_registry", return_value={"P": old_url}):
                 old_request = load_request(root)
             event(old_request, "request_submitted", phase="submit", submission_attempt=1)
-            receipt(old_request, "waiting_for_response", "pending")
+            receipt(old_request, "chat_busy_reconnecting", "stuck generation",
+                    same_request_preserved=True, agent_action_required=False)
             with patch("chat_courier.model._load_registry", return_value={"P": new_url}):
                 active_request = load_request(root)
 
