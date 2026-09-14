@@ -345,6 +345,23 @@ class StorageTests(unittest.TestCase):
                 run.assert_called_once_with(args)
                 self.assertEqual(retry_once_command(args), 2)
 
+    def test_evidence_retry_allows_interrupted_submission_intent_write(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            receipt(request, "queue_turn_acquired", "turn acquired")
+            event(request, "submission_intent_writing", phase="submit")
+            save_latest_probe(request, user_turn_found=False, reply_found=False,
+                              live_owner_found=False)
+            args = type("Args", (), {"request_directory": str(request.directory)})()
+            with patch("chat_courier.model._load_registry", return_value={
+                        "P": "https://chatgpt.com/c/x"}), \
+                    patch("chat_courier.cli.read_owner", return_value=None), \
+                    patch("chat_courier.cli.run_command", return_value=0) as run:
+                self.assertEqual(retry_once_command(args), 0)
+                self.assertTrue(args.evidence_retry)
+                run.assert_called_once_with(args)
+                self.assertEqual(retry_once_command(args), 2)
+
     def test_evidence_retry_adopts_user_registered_empty_rollover_target(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

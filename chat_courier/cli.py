@@ -904,7 +904,15 @@ def retry_once_command(args: argparse.Namespace) -> int:
                     successor_url=request.chat_url)
             previous = load_receipt(request)
             events = request_events(request)
-        if previous is None or previous.get("state") not in recoverable_unsent_states:
+        interrupted_before_intent = (
+            any(value.get("event") == "submission_intent_writing" for value in events)
+            and not any(value.get("event") in {
+                "submission_intent_written", "request_submitted",
+                "chat_submission_unconfirmed", "submission_unconfirmed",
+            } for value in events)
+        )
+        if (previous is None or previous.get("state") not in recoverable_unsent_states) \
+                and not interrupted_before_intent:
             raise ValidationError(
                 "evidence retry requires queue recovery or a resolved pre-submit authentication failure"
             )
