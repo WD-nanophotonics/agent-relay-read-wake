@@ -1105,7 +1105,10 @@ def rollover_target_command(args: argparse.Namespace) -> int:
             return terminal
         assert queue is not None
         try:
-            with ChatSession(request, status_callback=lambda name, **values: _upload_status(request, name, **values)) as session:
+            with ChatSession(
+                request, inspect_project=True,
+                status_callback=lambda name, **values: _upload_status(request, name, **values),
+            ) as session:
                 session.prepare_successor_project_chat()
                 archive = archive_target_generation(request) if prior is not None else None
                 if archive is not None:

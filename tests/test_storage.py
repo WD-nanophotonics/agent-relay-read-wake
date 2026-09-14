@@ -603,7 +603,9 @@ class StorageTests(unittest.TestCase):
 
             class Session:
                 profile = Path("profile")
-                def __init__(self, *_args, **_kwargs): pass
+                def __init__(self, *_args, **kwargs):
+                    if kwargs.get("inspect_project") is not True:
+                        raise AssertionError("rollover must not wait for the old composer")
                 def __enter__(self): return self
                 def __exit__(self, *_args): pass
                 def prepare_successor_project_chat(self): pass
