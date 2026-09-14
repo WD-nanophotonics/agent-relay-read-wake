@@ -127,9 +127,25 @@ def _load_pending_registrations() -> dict[str, dict[str, Any]]:
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        for attempt in range(6):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(min(0.05 * (2 ** attempt), 0.5))
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 def propose_url_registration(project_id: str, url: str) -> dict[str, Any]:
     """Create a short-lived registration proposal without changing the active URL."""

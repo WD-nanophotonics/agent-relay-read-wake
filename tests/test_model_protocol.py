@@ -8,11 +8,33 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from chat_courier.model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, DEFAULT_QUEUE_WAIT_SECONDS, DEFAULT_WINDOW_SECONDS, ValidationError, chat_project_id_from_url, commit_conversation_rollover, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, project_landing_url, propose_url_registration, same_chat_project
+from chat_courier.model import ACTIVE_SETUP_BUDGET_SECONDS, CALLER_GRACE_SECONDS, DEFAULT_QUEUE_WAIT_SECONDS, DEFAULT_WINDOW_SECONDS, ValidationError, atomic_json, chat_project_id_from_url, commit_conversation_rollover, commit_exhausted_conversation_rollover, confirm_url_registration, load_request, minimum_caller_window_seconds, project_landing_url, propose_url_registration, same_chat_project
 from chat_courier.protocol import BEGIN_RESPONSE, END_RESPONSE, REPLY_PROTOCOL, build_prompt, is_conversation_exhausted, parse_reply
 
 
 class ModelProtocolTests(unittest.TestCase):
+    def test_atomic_json_retries_transient_windows_replace_lock(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            target = root / "receipt.json"
+            attempts = 0
+
+            def transient_replace(source, destination):
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError(5, "temporarily locked")
+                Path(source).rename(destination)
+
+            with patch("chat_courier.model.os.replace", side_effect=transient_replace), \
+                    patch("chat_courier.model.time.sleep"):
+                atomic_json(target, {"state": "ready"})
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")),
+                             {"state": "ready"})
+            self.assertEqual(list(root.glob(".*.tmp")), [])
+
     def test_conversation_exhaustion_requires_the_specific_terminal_notice(self):
         self.assertTrue(is_conversation_exhausted(
             "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat."))
