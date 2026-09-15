@@ -1551,7 +1551,10 @@ def _regenerate_conflicting_envelope_once(request, conflict: dict[str, object]) 
 def _regenerate_interrupted_response_once(request) -> int:
     """Use ChatGPT's native Retry once for a terminal connection-error card."""
     events = request_events(request)
-    if any(item.get("event") == "response_ui_retry_click_intent" for item in events):
+    if any(item.get("event") in {
+        "response_ui_retry_click_intent",
+        "interrupted_reply_recovery_resend_intent",
+    } for item in events):
         return 1
     try:
         with ChatSession(request, recovery=True) as session:
@@ -1565,6 +1568,49 @@ def _regenerate_interrupted_response_once(request) -> int:
                 before_click=before_click, allow_ui_error=True,
             )
     except (ValidationError, OwnerBusy, BrowserError) as exc:
+        clicked = any(item.get("event") == "response_ui_retry_click_intent"
+                      for item in request_events(request))
+        native_unavailable = isinstance(exc, BrowserError) and (
+            str(exc).startswith("the exact Courier request has no assistant reply")
+            or str(exc).startswith("no unambiguous page-native regenerate control")
+        )
+        if native_unavailable and not clicked:
+            recovery_prompt = (
+                "CHAT_COURIER_RECOVERY_NOTICE/1\n"
+                f"PROJECT_ID={request.project_id}\n"
+                f"REQUEST_ID={request.request_id}\n"
+                "The response generation for this same logical request was interrupted, or its "
+                "original turn is not visible in the currently loaded conversation branch. This is "
+                "not a new work order. Answer the exact immutable request below once, using the same "
+                "REQUEST_ID envelope.\n\n" + build_prompt(request)
+            )
+            values = {"same_logical_request": True, "maximum_attempts": 1}
+            event(request, "interrupted_reply_recovery_resend_intent",
+                  phase="reconcile", **values)
+            receipt(request, "interrupted_reply_recovery_resend_intent",
+                    "Courier will send one labeled same-request recovery turn", **values)
+            emit("interrupted_reply_recovery_resend_intent", ok=True, phase="reconcile",
+                 project_id=request.project_id, request_id=request.request_id, **values)
+            try:
+                with ChatSession(request, recovery=True) as session:
+                    session.submit(recovery_prompt, request.attachments)
+            except (ValidationError, OwnerBusy, BrowserError) as resend_exc:
+                event(request, "interrupted_reply_recovery_resend_failed",
+                      phase="reconcile", detail=str(resend_exc))
+                emit("interrupted_reply_recovery_resend_failed", ok=False,
+                     phase="reconcile", project_id=request.project_id,
+                     request_id=request.request_id, retry_allowed=False,
+                     detail=str(resend_exc))
+                return 1
+            event(request, "interrupted_reply_recovery_resend_submitted",
+                  phase="reconcile", **values)
+            receipt(request, "waiting_for_response",
+                    "One labeled recovery turn was submitted for the same logical request",
+                    **values)
+            emit("interrupted_reply_recovery_resend_submitted", ok=True,
+                 phase="reconcile", project_id=request.project_id,
+                 request_id=request.request_id, **values)
+            return run_command(argparse.Namespace(request_directory=str(request.directory)))
         event(request, "response_ui_retry_unavailable", phase="reconcile", detail=str(exc))
         emit("response_ui_retry_unavailable", ok=False, phase="reconcile",
              project_id=request.project_id, request_id=request.request_id,
