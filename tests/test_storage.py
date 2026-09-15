@@ -68,6 +68,23 @@ class StorageTests(unittest.TestCase):
             self.assertIn("CHAT_COURIER_RECOVERY_NOTICE/1", submitted[0])
             self.assertIn("REQUEST_ID=P-1", submitted[0])
 
+    def test_interrupted_recovery_pre_send_busy_does_not_consume_budget(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            event(request, "interrupted_reply_recovery_resend_intent", phase="reconcile")
+
+            class Session:
+                def __init__(self, *_args, **_kwargs): self.page = object()
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+
+            with patch("chat_courier.cli.ChatSession", Session), \
+                    patch("chat_courier.cli.ChatDom.regenerate_conflicting_reply",
+                          return_value={"method": "page_native_regenerate"}) as retry, \
+                    patch("chat_courier.cli.run_command", return_value=0):
+                self.assertEqual(_regenerate_interrupted_response_once(request), 0)
+            self.assertEqual(retry.call_count, 1)
+
     def test_wrong_id_reply_falls_back_to_one_labeled_same_request_turn(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.request(Path(value))

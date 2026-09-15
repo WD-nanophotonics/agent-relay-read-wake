@@ -1553,7 +1553,8 @@ def _regenerate_interrupted_response_once(request) -> int:
     events = request_events(request)
     if any(item.get("event") in {
         "response_ui_retry_click_intent",
-        "interrupted_reply_recovery_resend_intent",
+        "interrupted_reply_recovery_resend_submitted",
+        "interrupted_reply_recovery_submission_unconfirmed",
     } for item in events):
         return 1
     try:
@@ -1592,8 +1593,34 @@ def _regenerate_interrupted_response_once(request) -> int:
             emit("interrupted_reply_recovery_resend_intent", ok=True, phase="reconcile",
                  project_id=request.project_id, request_id=request.request_id, **values)
             try:
-                with ChatSession(request, recovery=True) as session:
-                    session.submit(recovery_prompt, request.attachments)
+                contention_reconnects = 0
+                rate_limit_reconnects = 0
+                while True:
+                    try:
+                        with ChatSession(request, recovery=True) as session:
+                            session.submit(recovery_prompt, request.attachments)
+                        break
+                    except SubmissionUnconfirmed as uncertain_exc:
+                        event(request, "interrupted_reply_recovery_submission_unconfirmed",
+                              phase="reconcile", detail=str(uncertain_exc))
+                        raise
+                    except (ChatComposerNotReady, PreSubmissionError) as busy_exc:
+                        snapshot = _chat_contention_snapshot(busy_exc)
+                        rate_limited = bool(snapshot and snapshot.get("rate_limited") is True)
+                        if snapshot is None:
+                            raise
+                        if rate_limited:
+                            if rate_limit_reconnects >= 1:
+                                raise
+                            rate_limit_reconnects += 1
+                        else:
+                            if contention_reconnects >= CHAT_CONTENTION_RECONNECT_ATTEMPTS:
+                                raise
+                            contention_reconnects += 1
+                        _wait_for_shared_chat(
+                            request, busy_exc,
+                            1 if rate_limited else contention_reconnects,
+                        )
             except (ValidationError, OwnerBusy, BrowserError) as resend_exc:
                 event(request, "interrupted_reply_recovery_resend_failed",
                       phase="reconcile", detail=str(resend_exc))
