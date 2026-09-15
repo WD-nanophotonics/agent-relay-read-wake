@@ -287,11 +287,10 @@ class StorageTests(unittest.TestCase):
                 self.assertEqual(load_request(request.directory).retry_message, "compact message")
                 run.assert_called_once_with(args)
 
-    def test_supervisor_resend_allows_one_zero_submission_retry_after_evidence_retry(self):
+    def test_supervisor_resend_allows_one_zero_submission_retry_after_unconfirmed_send(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.request(Path(value))
-            receipt(request, "submission_intent", "stalled before send")
-            event(request, "evidence_retry_authorized", phase="retry")
+            receipt(request, "submission_unconfirmed", "Send was not visibly accepted")
             save_latest_probe(request, user_turn_found=False, reply_found=False,
                               live_owner_found=False)
             args = type("Args", (), {"request_directory": str(request.directory)})()

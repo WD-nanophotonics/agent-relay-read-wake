@@ -820,9 +820,16 @@ def resend_once_command(args: argparse.Namespace) -> int:
         request = load_request(args.request_directory)
         count = submission_count(request)
         events = request_events(request)
-        supervisor_zero_submission = count == 0 and evidence_retry_count(request) == 1
+        # `courier_resend_once` is the explicit Supervisor recovery command.
+        # Do not require an earlier ordinary evidence-retry event as a second
+        # authorization token: that creates a circular deadlock when the
+        # original Send was unconfirmed and the ordinary retry correctly
+        # refused the uncertain state.  Fresh exclusive absence evidence and
+        # the one-shot Supervisor event are the complete mechanical gate.
+        supervisor_zero_submission = count == 0
         if supervisor_zero_submission:
             probe = load_latest_probe(request)
+            previous = load_receipt(request)
             owner = read_owner()
             owner_live = bool(owner and (process_alive(owner.owner_pid)
                                         or (owner.browser_pid and process_alive(owner.browser_pid))))
@@ -833,6 +840,10 @@ def resend_once_command(args: argparse.Namespace) -> int:
                     or probe.get("live_owner_found") or owner_live
                     or any(value.get("event") == "supervisor_retry_authorized" for value in events)):
                 raise ValidationError("Supervisor zero-submission retry lacks fresh exclusive evidence")
+            if previous is None or previous.get("state") not in {
+                    "submission_unconfirmed", "submission_not_started", "submission_intent",
+                    "queue_recovery_required", "chat_auth_required"}:
+                raise ValidationError("Supervisor zero-submission retry is not at a recoverable send boundary")
             event(request, "supervisor_retry_authorized", phase="resend",
                   probe_captured_at=probe["captured_at"], probe_fingerprint=probe["fingerprint"])
         elif count != 1:
