@@ -1690,6 +1690,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
     state = current.get("state") if current else "prepared"
     event(request, "reconcile_started", phase="reconcile", state=state,
           target_generation=binding["generation"])
+    accepted_ui_error = False
     if state == "response_received":
         response_path = request.directory / "response.txt"
         try:
@@ -1704,6 +1705,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
                  project_id=request.project_id, request_id=request.request_id,
                  response_path=str(response_path))
             return 0
+        accepted_ui_error = True
         archived = request.directory / "rejected-response-ui-error.txt"
         if archived.exists():
             archived = request.directory / f"rejected-response-ui-error-{int(time.time())}.txt"
@@ -1717,13 +1719,11 @@ def reconcile_command(args: argparse.Namespace) -> int:
 
     # A rejected capture is an observation, not a permanent input. Preserve it
     # and re-read the conversation before making another protocol decision.
-    interrupted_ui_error = False
+    interrupted_ui_error = accepted_ui_error
     if state == "response_ui_error":
         loaded = load_response_capture(request)
-        interrupted_ui_error = bool(
-            loaded is not None
-            and "connection interrupted. waiting for the complete answer"
-            in " ".join(loaded[1].split()).casefold()
+        interrupted_ui_error = interrupted_ui_error or bool(
+            loaded is not None and is_chat_ui_error(loaded[1])
         )
     if state in {"response_protocol_error", "response_ui_error"}:
         archive_response_capture(request, max(1, evidence_retry_count(request) + 1))

@@ -257,6 +257,24 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(sum(item.get("event") == "uncertain_auto_resend_authorized"
                                  for item in request_events(request)), 1)
 
+    def test_reconcile_retries_a_previously_accepted_ui_error(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value); request = self.request(root)
+            (root / "response.txt").write_text(
+                "Message delivery timed out. Please try again. Retry",
+                encoding="utf-8",
+            )
+            receipt(request, "response_received", "legacy false positive")
+            args = type("Args", (), {"request_directory": str(root)})()
+            with patch("chat_courier.model._load_registry",
+                       return_value={"P": request.chat_url}), \
+                    patch("chat_courier.cli._regenerate_interrupted_response_once",
+                          return_value=0) as retry:
+                self.assertEqual(reconcile_command(args), 0)
+            retry.assert_called_once_with(request)
+            self.assertFalse((root / "response.txt").exists())
+            self.assertTrue((root / "rejected-response-ui-error.txt").exists())
+
     def test_target_rollover_changes_binding_not_payload_identity(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
