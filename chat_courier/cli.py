@@ -1468,12 +1468,15 @@ def _regenerate_conflicting_envelope_once(request, conflict: dict[str, object]) 
     emit("response_regeneration_intent", ok=True, phase="reconcile",
          project_id=request.project_id, request_id=request.request_id, **intent)
     try:
-        with ChatSession(request, recovery=True) as session:
+        with ChatSession(request, recovery=True, require_composer=False) as session:
+            dom = ChatDom(session.page)
+            if dom.interrupted_generation():
+                raise BrowserError("the visible interrupted generation must be stopped before recovery")
             def before_click(values: dict[str, object]) -> None:
                 event(request, "response_regeneration_click_intent", phase="reconcile", **values)
                 receipt(request, "response_regeneration_click_intent",
                         "Courier is about to click one page-native regenerate control", **values)
-            action = ChatDom(session.page).regenerate_conflicting_reply(
+            action = dom.regenerate_conflicting_reply(
                 f"REQUEST_ID={request.request_id}", request.request_id,
                 before_click=before_click,
             )
@@ -1554,9 +1557,22 @@ def _regenerate_interrupted_response_once(request) -> int:
     if any(item.get("event") in {
         "response_ui_retry_click_intent",
         "interrupted_reply_recovery_resend_submitted",
-        "interrupted_reply_recovery_submission_unconfirmed",
     } for item in events):
         return 1
+    if any(item.get("event") == "interrupted_reply_recovery_submission_unconfirmed"
+           for item in events):
+        try:
+            diagnostic = json.loads(
+                (request.directory / "submission_diagnostic.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            diagnostic = {}
+        proven_unsent = bool(
+            diagnostic.get("composer_contains_marker") is True
+            and not diagnostic.get("user_turns_with_marker")
+        )
+        if not proven_unsent:
+            return 1
     try:
         with ChatSession(request, recovery=True) as session:
             def before_click(values: dict[str, object]) -> None:
@@ -1574,6 +1590,7 @@ def _regenerate_interrupted_response_once(request) -> int:
         native_unavailable = isinstance(exc, BrowserError) and (
             str(exc).startswith("the exact Courier request has no assistant reply")
             or str(exc).startswith("no unambiguous page-native regenerate control")
+            or str(exc).startswith("the visible interrupted generation must be stopped")
         )
         if native_unavailable and not clicked:
             recovery_prompt = (
@@ -1597,7 +1614,18 @@ def _regenerate_interrupted_response_once(request) -> int:
                 rate_limit_reconnects = 0
                 while True:
                     try:
-                        with ChatSession(request, recovery=True) as session:
+                        with ChatSession(request, recovery=True, require_composer=False) as session:
+                            dom = ChatDom(session.page)
+                            if dom.interrupted_generation():
+                                def before_stop(stop_values: dict[str, object]) -> None:
+                                    event(request, "interrupted_generation_stop_intent",
+                                          phase="reconcile", **stop_values)
+                                    receipt(request, "interrupted_generation_stop_intent",
+                                            "Courier is about to stop the known connection-interrupted generation",
+                                            **stop_values)
+                                stopped = dom.stop_interrupted_generation(before_click=before_stop)
+                                event(request, "interrupted_generation_stopped",
+                                      phase="reconcile", **stopped)
                             session.submit(recovery_prompt, request.attachments)
                         break
                     except SubmissionUnconfirmed as uncertain_exc:

@@ -689,23 +689,9 @@ class ChatDom:
         return {"message_count": snapshot.get("message_count"), **messages[-1]}
 
     def streaming(self) -> bool:
-        # ChatGPT can leave a visible stop control behind after a transport
-        # interruption even though the composer is already usable again.  That
-        # UI error card is terminal, not an indefinitely active generation.
-        # Prefer the final assistant state plus an actionable composer over the
-        # stale control so the next queued request is not blocked forever.
-        try:
-            nodes = self.page.locator(self.assistant_selector)
-            if nodes.count():
-                latest = nodes.nth(nodes.count() - 1)
-                text = latest.inner_text().strip()
-                if is_chat_ui_error(text):
-                    composer = self.composer()
-                    if (composer.is_visible() and composer.is_enabled()
-                            and composer.is_editable()):
-                        return False
-        except Exception:
-            pass
+        # A visible Stop control is authoritative. ChatGPT can leave the
+        # composer editable while an interrupted response is still occupying
+        # the turn; treating that shape as idle loses drafts and cannot Send.
         try:
             if self.page.locator(self.stop_selector).count() and self.page.locator(self.stop_selector).first.is_visible(): return True
         except Exception:
@@ -717,6 +703,40 @@ class ChatDom:
             return any((latest.get_attribute(attr) or "").lower() in {"true", "1"} for attr in ("data-is-streaming", "data-message-is-streaming", "aria-busy"))
         except Exception:
             return False
+
+    def interrupted_generation(self) -> bool:
+        """Return true only for a visible Stop control plus the known UI error card."""
+        try:
+            nodes = self.page.locator(self.assistant_selector)
+            return bool(
+                nodes.count()
+                and is_chat_ui_error(nodes.nth(nodes.count() - 1).inner_text().strip())
+                and self.page.locator(self.stop_selector).count()
+                and self.page.locator(self.stop_selector).first.is_visible()
+            )
+        except Exception:
+            return False
+
+    def stop_interrupted_generation(self, *,
+                                    before_click: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        """Stop one mechanically identified connection-interrupted generation."""
+        if not self.interrupted_generation():
+            raise BrowserError("ChatGPT is not in the known interrupted-generation state")
+        controls = self.page.locator(self.stop_selector)
+        visible = [controls.nth(index) for index in range(controls.count())
+                   if controls.nth(index).is_visible() and controls.nth(index).is_enabled()]
+        if len(visible) != 1:
+            raise BrowserError("the interrupted generation has no unique enabled Stop control")
+        values = {"selector": self.stop_selector, "method": "stop_interrupted_generation"}
+        if before_click is not None:
+            before_click(values)
+        visible[0].click(timeout=5000)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if not self.streaming():
+                return values
+            self.page.wait_for_timeout(250)
+        raise BrowserError("the interrupted generation did not stop after the Stop click")
 
     def ready_for_next_turn(self) -> bool:
         """Return true once ChatGPT restored the composer after generation."""
