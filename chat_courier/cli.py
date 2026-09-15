@@ -1717,9 +1717,21 @@ def reconcile_command(args: argparse.Namespace) -> int:
               archived_response_path=str(archived))
         state = "response_ui_error"
 
+    events = request_events(request)
+    last_reclassified = max(
+        (index for index, item in enumerate(events)
+         if item.get("event") == "accepted_ui_error_reclassified"),
+        default=-1,
+    )
+    last_native_retry = max(
+        (index for index, item in enumerate(events)
+         if item.get("event") == "response_ui_retry_click_intent"),
+        default=-1,
+    )
+
     # A rejected capture is an observation, not a permanent input. Preserve it
     # and re-read the conversation before making another protocol decision.
-    interrupted_ui_error = accepted_ui_error
+    interrupted_ui_error = accepted_ui_error or last_reclassified > last_native_retry
     if state == "response_ui_error":
         loaded = load_response_capture(request)
         interrupted_ui_error = interrupted_ui_error or bool(
@@ -1733,7 +1745,6 @@ def reconcile_command(args: argparse.Namespace) -> int:
         if recovered == 0:
             return 0
 
-    events = request_events(request)
     sent = request_was_submitted(request)
     last_rollover = max((index for index, item in enumerate(events)
                          if item.get("event") == "target_rollover_authorized"), default=-1)

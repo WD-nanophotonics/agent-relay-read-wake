@@ -275,6 +275,19 @@ class StorageTests(unittest.TestCase):
             self.assertFalse((root / "response.txt").exists())
             self.assertTrue((root / "rejected-response-ui-error.txt").exists())
 
+    def test_reconcile_remembers_an_archived_ui_error_after_restart(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value); request = self.request(root)
+            event(request, "accepted_ui_error_reclassified", phase="reconcile")
+            receipt(request, "waiting_for_response", "restarted after archival")
+            args = type("Args", (), {"request_directory": str(root)})()
+            with patch("chat_courier.model._load_registry",
+                       return_value={"P": request.chat_url}), \
+                    patch("chat_courier.cli._regenerate_interrupted_response_once",
+                          return_value=0) as retry:
+                self.assertEqual(reconcile_command(args), 0)
+            retry.assert_called_once_with(request)
+
     def test_target_rollover_changes_binding_not_payload_identity(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
