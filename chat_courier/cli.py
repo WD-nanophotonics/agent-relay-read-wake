@@ -1096,6 +1096,33 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                     "response_received",
                 } for value in events)
             )
+            # A failed Enter/send action is still mechanically proven unsent
+            # when the immutable marker remains in the composer and no user
+            # turn contains it.  With explicit user-direct rollover authority,
+            # this should move to a fresh same-Project chat instead of becoming
+            # an irreversible dead end.
+            try:
+                submission_diagnostic = json.loads(
+                    (request.directory / "submission_diagnostic.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                submission_diagnostic = {}
+            proven_unconfirmed_unsent = (
+                prior_count == 0
+                and any(value.get("event") == "chat_submission_unconfirmed"
+                        for value in events)
+                and not any(value.get("event") in {
+                    "request_submitted", "response_received",
+                } for value in events)
+                and isinstance(submission_diagnostic, dict)
+                and submission_diagnostic.get("request_id") == request.request_id
+                and submission_diagnostic.get("marker") == f"REQUEST_ID={request.request_id}"
+                and submission_diagnostic.get("composer_contains_marker") is True
+                and submission_diagnostic.get("user_turns_with_marker") == []
+                and submission_diagnostic.get("page_url") == request.chat_url
+            )
             confirmed_pending = (
                 prior_count == 1 and prior is not None
                 and prior.get("state") in {
@@ -1107,7 +1134,9 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                     "chat_submission_unconfirmed", "response_received",
                 } for value in events)
             )
-            if response_path.exists() or not (pristine or proven_unsent or confirmed_pending):
+            if response_path.exists() or not (
+                    pristine or proven_unsent or proven_unconfirmed_unsent
+                    or confirmed_pending):
                 raise ValidationError(
                     "user-direct rollover requires a fresh request, a proven-unsent request, "
                     "or one confirmed pending submission"
