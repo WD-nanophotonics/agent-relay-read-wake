@@ -1135,16 +1135,39 @@ def rollover_target_command(args: argparse.Namespace) -> int:
                 and submission_diagnostic.get("user_turns_with_marker") == []
                 and submission_diagnostic.get("page_url") == request.chat_url
             )
+            last_confirmed_submission = max(
+                (index for index, value in enumerate(events)
+                 if value.get("event") in {
+                     "request_submitted", "interrupted_reply_recovery_resend_submitted",
+                 }),
+                default=-1,
+            )
+            last_submission_uncertainty = max(
+                (index for index, value in enumerate(events)
+                 if value.get("event") in {
+                     "chat_submission_unconfirmed",
+                     "interrupted_reply_recovery_submission_unconfirmed",
+                 }),
+                default=-1,
+            )
+            last_response_received = max(
+                (index for index, value in enumerate(events)
+                 if value.get("event") == "response_received"),
+                default=-1,
+            )
+            last_ui_error_reclassified = max(
+                (index for index, value in enumerate(events)
+                 if value.get("event") == "accepted_ui_error_reclassified"),
+                default=-1,
+            )
             confirmed_pending = (
-                prior_count == 1 and prior is not None
+                prior_count >= 1 and prior is not None
                 and prior.get("state") in {
                     "waiting_for_response", "response_timeout", "queue_recovery_required",
                     "chat_busy_waiting", "chat_busy_reconnecting",
                 }
-                and sum(value.get("event") == "request_submitted" for value in events) == 1
-                and not any(value.get("event") in {
-                    "chat_submission_unconfirmed", "response_received",
-                } for value in events)
+                and last_confirmed_submission > last_submission_uncertainty
+                and last_ui_error_reclassified >= last_response_received
             )
             if response_path.exists() or not (
                     pristine or proven_unsent or proven_unconfirmed_unsent

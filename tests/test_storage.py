@@ -827,7 +827,14 @@ class StorageTests(unittest.TestCase):
             new_url = "https://chatgpt.com/g/g-p-project/c/new"
             with patch("chat_courier.model._load_registry", return_value={"P": old_url}):
                 old_request = load_request(root)
+            event(old_request, "chat_submission_unconfirmed", phase="submit")
             event(old_request, "request_submitted", phase="submit", submission_attempt=1)
+            event(old_request, "interrupted_reply_recovery_submission_unconfirmed",
+                  phase="reconcile")
+            event(old_request, "interrupted_reply_recovery_resend_submitted",
+                  phase="reconcile")
+            event(old_request, "response_received", phase="complete")
+            event(old_request, "accepted_ui_error_reclassified", phase="reconcile")
             receipt(old_request, "chat_busy_reconnecting", "stuck generation",
                     same_request_preserved=True, agent_action_required=False)
             with patch("chat_courier.model._load_registry", return_value={"P": new_url}):
