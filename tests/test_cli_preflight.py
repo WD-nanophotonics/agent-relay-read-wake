@@ -85,6 +85,7 @@ class CliPreflightTests(unittest.TestCase):
         messages = (
             "Connection interrupted. Waiting for the complete answer",
             "This content can’t be shown\nWe’re especially careful with cybersecurity requests.",
+            "Message delivery timed out. Please try again.\nRetry",
         )
         for index, message in enumerate(messages):
             class Session:

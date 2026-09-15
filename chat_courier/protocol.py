@@ -8,8 +8,10 @@ REPLY_PROTOCOL = "CHAT_COURIER_REPLY/1"; BEGIN_RESPONSE = "BEGIN_RESPONSE"; END_
 def is_chat_ui_error(text: str) -> bool:
     """Recognize completed Chat UI error cards, not normal assistant prose."""
     normalized = " ".join(text.replace("’", "'").split()).casefold()
-    return normalized.endswith("connection interrupted. waiting for the complete answer") or normalized.startswith(
-        "this content can't be shown"
+    return (
+        normalized.endswith("connection interrupted. waiting for the complete answer")
+        or normalized.startswith("this content can't be shown")
+        or normalized.startswith("message delivery timed out. please try again")
     )
 
 def is_conversation_exhausted(text: str) -> bool:

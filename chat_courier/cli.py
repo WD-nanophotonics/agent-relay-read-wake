@@ -1554,10 +1554,7 @@ def _regenerate_conflicting_envelope_once(request, conflict: dict[str, object]) 
 def _regenerate_interrupted_response_once(request) -> int:
     """Use ChatGPT's native Retry once for a terminal connection-error card."""
     events = request_events(request)
-    if any(item.get("event") in {
-        "response_ui_retry_click_intent",
-        "interrupted_reply_recovery_resend_submitted",
-    } for item in events):
+    if any(item.get("event") == "response_ui_retry_click_intent" for item in events):
         return 1
     if any(item.get("event") == "interrupted_reply_recovery_submission_unconfirmed"
            for item in events):
@@ -1593,6 +1590,9 @@ def _regenerate_interrupted_response_once(request) -> int:
             or str(exc).startswith("the visible interrupted generation must be stopped")
         )
         if native_unavailable and not clicked:
+            if any(item.get("event") == "interrupted_reply_recovery_resend_submitted"
+                   for item in request_events(request)):
+                return 1
             recovery_prompt = (
                 "CHAT_COURIER_RECOVERY_NOTICE/1\n"
                 f"PROJECT_ID={request.project_id}\n"
@@ -1691,10 +1691,29 @@ def reconcile_command(args: argparse.Namespace) -> int:
     event(request, "reconcile_started", phase="reconcile", state=state,
           target_generation=binding["generation"])
     if state == "response_received":
-        emit("response_duplicate", ok=True, phase="complete",
-             project_id=request.project_id, request_id=request.request_id,
-             response_path=str(request.directory / "response.txt"))
-        return 0
+        response_path = request.directory / "response.txt"
+        try:
+            accepted_text = response_path.read_text(encoding="utf-8-sig")
+        except OSError as exc:
+            emit("courier_reconcile_failed", ok=False, phase="reconcile",
+                 project_id=request.project_id, request_id=request.request_id,
+                 detail=f"saved response is unreadable: {exc}")
+            return 1
+        if not is_chat_ui_error(accepted_text):
+            emit("response_duplicate", ok=True, phase="complete",
+                 project_id=request.project_id, request_id=request.request_id,
+                 response_path=str(response_path))
+            return 0
+        archived = request.directory / "rejected-response-ui-error.txt"
+        if archived.exists():
+            archived = request.directory / f"rejected-response-ui-error-{int(time.time())}.txt"
+        response_path.replace(archived)
+        receipt(request, "response_ui_error",
+                "A previously accepted response was reclassified as a Chat UI error",
+                archived_response_path=str(archived))
+        event(request, "accepted_ui_error_reclassified", phase="reconcile",
+              archived_response_path=str(archived))
+        state = "response_ui_error"
 
     # A rejected capture is an observation, not a permanent input. Preserve it
     # and re-read the conversation before making another protocol decision.
