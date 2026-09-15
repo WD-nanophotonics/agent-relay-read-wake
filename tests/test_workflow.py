@@ -101,9 +101,11 @@ def test_status_proves_live_shared_chat_contention(tmp_path, monkeypatch):
     value = request_status(request.directory)
 
     assert value["state"] == "chat_busy_waiting"
+    assert value["state_class"] == "WAITING"
     assert value["contention_wait_active"] is True
     assert value["agent_action_required"] is False
     assert value["safe_next_action"] == "wait_for_same_request"
+    assert value["next_check_at"] == 2000.0
 
 
 def test_status_rejects_stale_shared_chat_contention(tmp_path, monkeypatch):

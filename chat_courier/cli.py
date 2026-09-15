@@ -412,6 +412,7 @@ def _wait_for_shared_chat(request, exc: Exception, attempt: int = 1) -> None:
         "wait_seconds": wait_seconds,
         "wait_started_at": wait_started_at,
         "wait_deadline_at": wait_started_at + wait_seconds,
+        "next_check_at": wait_started_at + wait_seconds,
         "runner_pid": os.getpid(),
         "reconnect_attempt": attempt,
         "maximum_reconnect_attempts": 1 if rate_limited else CHAT_CONTENTION_RECONNECT_ATTEMPTS,

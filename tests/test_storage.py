@@ -230,7 +230,18 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(capture["raw_sha256"], saved["raw_sha256"])
             self.assertEqual(text, "reply without an envelope")
             (Path(value) / "response.raw.txt").write_text("drift", encoding="utf-8")
-            with self.assertRaises(ValidationError): load_response_capture(request)
+            self.assertIsNone(load_response_capture(request))
+
+    def test_cursor_and_receipt_caches_recover_without_blocking_reconcile(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+            save_response_cursor(request, {"old-a"})
+            (request.directory / "response-cursor.json").write_text("{broken", encoding="utf-8")
+            self.assertIsNone(load_response_cursor(request))
+            receipt(request, "queued", "first")
+            receipt(request, "waiting_for_response", "second")
+            (request.directory / "receipt.json").write_text("{broken", encoding="utf-8")
+            self.assertEqual(load_receipt(request)["state"], "queued")
 
     def test_only_explicit_post_send_states_enter_read_only_recovery(self):
         self.assertFalse(_submission_confirmed({"state": "submission_intent"}))

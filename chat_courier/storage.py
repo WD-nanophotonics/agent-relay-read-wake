@@ -61,11 +61,18 @@ def ensure_target_binding(request: Request, *, basis: str = "registered_target")
     return value
 
 def receipt_path(request: Request) -> Path: return request.directory / "receipt.json"
+def receipt_backup_path(request: Request) -> Path: return request.directory / "receipt.json.last-known-good"
 def load_receipt(request: Request) -> dict[str, Any] | None:
     path = receipt_path(request)
     if not path.exists(): return None
     try: value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc: raise ValidationError(f"invalid receipt.json: {path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        # A receipt is a projection of events/ledger facts.  Recovering its
+        # last valid projection is safer than turning one torn cache write
+        # into a permanent transport failure.
+        try: value = json.loads(receipt_backup_path(request).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise ValidationError(f"invalid receipt.json: {path}") from exc
     if not isinstance(value, dict) or not _belongs(value, request): raise ValidationError("receipt.json does not belong to this immutable request")
     return value
 def event(request: Request, name: str, **values: Any) -> None:
@@ -143,6 +150,13 @@ def receipt(request: Request, state: str, detail: str, **values: Any) -> None:
             preserved = {key: value for key, value in old.items() if key.startswith("queue_") or key in {"ahead_count", "estimated_wait_upper_bound_seconds", "current_owner", "execution_started_at"}}
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(current, dict) and _belongs(current, request):
+                atomic_json(receipt_backup_path(request), current)
+        except (OSError, json.JSONDecodeError):
+            pass
     atomic_json(path, {"version": 2, "project_id": request.project_id, "request_id": request.request_id, "fingerprint": request.fingerprint, "payload_fingerprint": request.payload_fingerprint, "target_url": request.chat_url, "state": state, "detail": detail, "workflow_window_seconds": request.workflow_window_seconds, "queue_wait_seconds": request.queue_wait_seconds, **preserved, **values})
 def save_response(request: Request, body: str) -> Path:
     path = request.directory / "response.txt"; temporary = path.with_suffix(".txt.tmp"); temporary.write_text(body, encoding="utf-8", newline="\n"); os.replace(temporary, path); return path
@@ -160,11 +174,13 @@ def load_response_cursor(request: Request) -> set[str] | None:
     path = response_cursor_path(request)
     if not path.exists(): return None
     try: value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc: raise ValidationError(f"invalid response cursor: {path}") from exc
+    # The cursor is only a performance cache.  A damaged or stale cursor must
+    # never prevent the ledger/DOM reconciliation path from finding a reply.
+    except (OSError, json.JSONDecodeError): return None
     identities = value.get("assistant_identities") if isinstance(value, dict) else None
     if (not isinstance(value, dict) or not _belongs(value, request) or not isinstance(identities, list)
             or not all(isinstance(item, str) for item in identities)):
-        raise ValidationError("response cursor does not belong to this request")
+        return None
     return set(identities)
 
 def response_capture_path(request: Request) -> Path: return request.directory / "response-capture.json"
@@ -231,17 +247,17 @@ def load_response_capture(request: Request) -> tuple[dict[str, Any], str] | None
     path = response_capture_path(request)
     if not path.exists(): return None
     try: value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc: raise ValidationError(f"invalid response capture: {path}") from exc
+    except (OSError, json.JSONDecodeError): return None
     if not isinstance(value, dict) or not _belongs(value, request):
-        raise ValidationError("response capture does not belong to this request")
+        return None
     raw_name = value.get("raw_path")
     if not isinstance(raw_name, str) or Path(raw_name).name != raw_name:
-        raise ValidationError("response capture raw path is invalid")
+        return None
     raw_path = request.directory / raw_name
     try: text = raw_path.read_text(encoding="utf-8")
-    except OSError as exc: raise ValidationError("captured response raw text is unavailable") from exc
+    except OSError: return None
     if hashlib.sha256(text.encode("utf-8")).hexdigest() != value.get("raw_sha256"):
-        raise ValidationError("captured response raw text hash does not match")
+        return None
     return value, text
 
 def merge_conversation_ledger(request: Request, snapshot: dict[str, Any], *,

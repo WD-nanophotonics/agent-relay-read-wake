@@ -221,9 +221,21 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
                 or (isinstance(runner_pid, int) and process_alive(runner_pid))
             )
         )
+    if state == "response_received":
+        state_class = "COMPLETED"
+    elif state in {"request_frozen", "chat_auth_required", "chat_access_denied",
+                   "chat_target_mismatch", "configuration_error"}:
+        state_class = "FROZEN"
+    elif request_was_submitted(request) or state in RECOVERY_ONLY_STATES:
+        state_class = "SENT_WAITING"
+    elif state in {"submission_not_started", "queue_timeout", "browser_error", "courier_error"}:
+        state_class = "SAFE_TO_RETRY"
+    else:
+        state_class = "WAITING"
     return {
         "project_id": request.project_id, "request_id": request.request_id,
         "request_directory": str(request.directory), "state": state,
+        "state_class": state_class,
         "terminal": state in TERMINAL_STATES and not recovery_only,
         "recovery_only_required": recovery_only,
         "response_path": str(request.directory / "response.txt") if state == "response_received" else None,
@@ -231,6 +243,7 @@ def request_status(request_directory: str | Path) -> dict[str, Any]:
         "contention_wait_active": contention_wait_active,
         "agent_action_required": receipt.get("agent_action_required") if receipt else None,
         "safe_next_action": receipt.get("safe_next_action") if receipt else None,
+        "next_check_at": receipt.get("next_check_at", receipt.get("wait_deadline_at")) if receipt else None,
     }
 
 
