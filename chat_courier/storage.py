@@ -133,6 +133,8 @@ def archive_target_generation(request: Request) -> Path:
         "receipt.json", "response.txt", "response.raw.txt", "response-capture.json",
         "latest-response.raw.txt", "latest-response-capture.json", "response-cursor.json",
         "submission_diagnostic.json", "submission_diagnostic.png",
+        "conversation-ledger.json", "conversation-snapshot.json",
+        "response-diagnostic.json", "absence-observations.json",
     ):
         source = request.directory / name
         if source.exists():

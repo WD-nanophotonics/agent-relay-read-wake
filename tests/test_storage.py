@@ -858,6 +858,9 @@ class StorageTests(unittest.TestCase):
             event(old_request, "accepted_ui_error_reclassified", phase="reconcile")
             receipt(old_request, "chat_busy_reconnecting", "stuck generation",
                     same_request_preserved=True, agent_action_required=False)
+            (root / "conversation-ledger.json").write_text(
+                json.dumps({"chat_url": old_url}), encoding="utf-8"
+            )
             with patch("chat_courier.model._load_registry", return_value={"P": new_url}):
                 active_request = load_request(root)
 
@@ -888,6 +891,10 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(submission_count(active_request), 1)
             self.assertEqual(submission_count(active_request, total=True), 2)
             self.assertTrue((root / "target-generation-1" / "receipt.json").is_file())
+            self.assertTrue(
+                (root / "target-generation-1" / "conversation-ledger.json").is_file()
+            )
+            self.assertFalse((root / "conversation-ledger.json").exists())
 
     def test_user_direct_rollover_accepts_proven_unsent_request(self):
         with tempfile.TemporaryDirectory() as value:
