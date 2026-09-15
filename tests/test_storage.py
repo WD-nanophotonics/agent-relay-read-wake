@@ -13,12 +13,34 @@ from chat_courier.storage import (event, load_receipt, load_response_capture, lo
                                   receipt, request_events, save_latest_probe, save_response, save_response_capture,
                                   save_latest_response_capture, save_response_cursor, submission_count)
 from chat_courier.cli import (_latest_conflicting_envelope, _regenerate_conflicting_envelope_once,
+                              _regenerate_interrupted_response_once,
                               _safe_pre_browser_turn_recovery, _submission_confirmed,
                               reconcile_command, resend_once_command, retry_once_command,
                               rollover_target_command)
 
 
 class StorageTests(unittest.TestCase):
+    def test_interrupted_response_native_retry_is_one_shot(self):
+        with tempfile.TemporaryDirectory() as value:
+            request = self.request(Path(value))
+
+            def native_retry(*_args, **kwargs):
+                kwargs["before_click"]({"method": "page_native_regenerate"})
+                return {"method": "page_native_regenerate"}
+
+            class Session:
+                def __init__(self, *_args, **_kwargs): self.page = object()
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+
+            with patch("chat_courier.cli.ChatSession", Session), \
+                    patch("chat_courier.cli.ChatDom.regenerate_conflicting_reply",
+                          side_effect=native_retry) as retry, \
+                    patch("chat_courier.cli.run_command", return_value=0):
+                self.assertEqual(_regenerate_interrupted_response_once(request), 0)
+                self.assertEqual(_regenerate_interrupted_response_once(request), 1)
+            self.assertEqual(retry.call_count, 1)
+
     def test_wrong_id_reply_falls_back_to_one_labeled_same_request_turn(self):
         with tempfile.TemporaryDirectory() as value:
             request = self.request(Path(value))

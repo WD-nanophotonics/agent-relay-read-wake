@@ -503,8 +503,9 @@ class ChatDom:
         return anchor_found, result
 
     def regenerate_conflicting_reply(self, marker: str, expected_request_id: str, *,
-                                     before_click: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-        """Regenerate one terminal assistant turn that names the wrong request.
+                                     before_click: Callable[[dict[str, Any]], None] | None = None,
+                                     allow_ui_error: bool = False) -> dict[str, Any]:
+        """Regenerate one terminal assistant turn that is unusable for this request.
 
         This is deliberately narrower than resubmission: the exact Courier user
         turn must exist, its immediately following assistant turn must be the
@@ -527,10 +528,14 @@ class ChatDom:
         request_ids = set(re.findall(
             r"REQUEST_ID=([A-Za-z0-9][A-Za-z0-9._:-]{0,127})", turn.text,
         ))
-        if "CHAT_COURIER_REPLY/1" not in turn.text or not request_ids:
-            raise BrowserError("the latest assistant turn is not a conflicting Courier envelope")
-        if expected_request_id in request_ids:
-            raise BrowserError("the latest assistant turn already names the expected request")
+        if allow_ui_error:
+            if not is_chat_ui_error(turn.text):
+                raise BrowserError("the latest assistant turn is not a Chat UI error")
+        else:
+            if "CHAT_COURIER_REPLY/1" not in turn.text or not request_ids:
+                raise BrowserError("the latest assistant turn is not a conflicting Courier envelope")
+            if expected_request_id in request_ids:
+                raise BrowserError("the latest assistant turn already names the expected request")
 
         conversation = self.page.locator(f"{self.user_selector}, {self.assistant_selector}")
         if turn.index != conversation.count() - 1:

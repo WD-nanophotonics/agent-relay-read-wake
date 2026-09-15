@@ -1548,6 +1548,35 @@ def _regenerate_conflicting_envelope_once(request, conflict: dict[str, object]) 
          project_id=request.project_id, request_id=request.request_id, **action)
     return run_command(argparse.Namespace(request_directory=str(request.directory)))
 
+def _regenerate_interrupted_response_once(request) -> int:
+    """Use ChatGPT's native Retry once for a terminal connection-error card."""
+    events = request_events(request)
+    if any(item.get("event") == "response_ui_retry_click_intent" for item in events):
+        return 1
+    try:
+        with ChatSession(request, recovery=True) as session:
+            def before_click(values: dict[str, object]) -> None:
+                event(request, "response_ui_retry_click_intent", phase="reconcile", **values)
+                receipt(request, "response_ui_retry_click_intent",
+                        "Courier is about to use ChatGPT's native Retry for the interrupted response",
+                        **values)
+            action = ChatDom(session.page).regenerate_conflicting_reply(
+                f"REQUEST_ID={request.request_id}", request.request_id,
+                before_click=before_click, allow_ui_error=True,
+            )
+    except (ValidationError, OwnerBusy, BrowserError) as exc:
+        event(request, "response_ui_retry_unavailable", phase="reconcile", detail=str(exc))
+        emit("response_ui_retry_unavailable", ok=False, phase="reconcile",
+             project_id=request.project_id, request_id=request.request_id,
+             retry_allowed=False, detail=str(exc))
+        return 1
+    event(request, "response_ui_retry_started", phase="reconcile", **action)
+    receipt(request, "waiting_for_response",
+            "ChatGPT started one page-native Retry for the interrupted response", **action)
+    emit("response_ui_retry_started", ok=True, phase="reconcile",
+         project_id=request.project_id, request_id=request.request_id, **action)
+    return run_command(argparse.Namespace(request_directory=str(request.directory)))
+
 def reconcile_command(args: argparse.Namespace) -> int:
     """Converge one immutable request from durable transport facts."""
     try:
@@ -1568,9 +1597,21 @@ def reconcile_command(args: argparse.Namespace) -> int:
 
     # A rejected capture is an observation, not a permanent input. Preserve it
     # and re-read the conversation before making another protocol decision.
+    interrupted_ui_error = False
+    if state == "response_ui_error":
+        loaded = load_response_capture(request)
+        interrupted_ui_error = bool(
+            loaded is not None
+            and "connection interrupted. waiting for the complete answer"
+            in " ".join(loaded[1].split()).casefold()
+        )
     if state in {"response_protocol_error", "response_ui_error"}:
         archive_response_capture(request, max(1, evidence_retry_count(request) + 1))
         event(request, "rejected_capture_archived", phase="reconcile", prior_state=state)
+    if interrupted_ui_error:
+        recovered = _regenerate_interrupted_response_once(request)
+        if recovered == 0:
+            return 0
 
     events = request_events(request)
     sent = request_was_submitted(request)
