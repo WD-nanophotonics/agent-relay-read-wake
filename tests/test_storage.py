@@ -308,6 +308,27 @@ class StorageTests(unittest.TestCase):
                 self.assertEqual(reconcile_command(args), 0)
             retry.assert_called_once_with(request)
 
+    def test_reconcile_does_not_carry_ui_error_into_successor_generation(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value); request = self.request(root)
+            event(request, "accepted_ui_error_reclassified", phase="reconcile")
+            event(request, "target_rollover_authorized", phase="target_rollover")
+            event(request, "request_submitted", phase="submit", target_rollover=True)
+            receipt(request, "waiting_for_response", "successor pending")
+            args = type("Args", (), {"request_directory": str(root)})()
+
+            def capture(_args):
+                receipt(request, "response_received", "successor replied",
+                        response_path=str(root / "response.txt"))
+                return 0
+
+            with patch("chat_courier.model._load_registry",
+                       return_value={"P": request.chat_url}), \
+                    patch("chat_courier.cli._regenerate_interrupted_response_once") as retry, \
+                    patch("chat_courier.cli.capture_latest_command", side_effect=capture):
+                self.assertEqual(reconcile_command(args), 0)
+            retry.assert_not_called()
+
     def test_target_rollover_changes_binding_not_payload_identity(self):
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

@@ -1750,14 +1750,21 @@ def reconcile_command(args: argparse.Namespace) -> int:
         state = "response_ui_error"
 
     events = request_events(request)
+    last_rollover = max(
+        (index for index, item in enumerate(events)
+         if item.get("event") == "target_rollover_authorized"),
+        default=-1,
+    )
     last_reclassified = max(
         (index for index, item in enumerate(events)
-         if item.get("event") == "accepted_ui_error_reclassified"),
+         if index > last_rollover
+         and item.get("event") == "accepted_ui_error_reclassified"),
         default=-1,
     )
     last_native_retry = max(
         (index for index, item in enumerate(events)
-         if item.get("event") == "response_ui_retry_click_intent"),
+         if index > last_rollover
+         and item.get("event") == "response_ui_retry_click_intent"),
         default=-1,
     )
 
@@ -1778,8 +1785,6 @@ def reconcile_command(args: argparse.Namespace) -> int:
             return 0
 
     sent = request_was_submitted(request)
-    last_rollover = max((index for index, item in enumerate(events)
-                         if item.get("event") == "target_rollover_authorized"), default=-1)
     uncertain = any(item.get("event") in {"chat_submission_unconfirmed", "submission_unconfirmed"}
                     for item in events[last_rollover + 1:])
     if (not sent and not uncertain
