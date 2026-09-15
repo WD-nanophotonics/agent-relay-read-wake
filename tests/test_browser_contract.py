@@ -186,6 +186,33 @@ class BrowserContractTests(unittest.TestCase):
         self.assertFalse(ChatDom(Page()).rate_limited())
         self.assertTrue(ChatDom(Page("Too many requests. Try again later.")).rate_limited())
 
+    def test_interrupted_reply_with_usable_composer_is_not_streaming(self):
+        class Element:
+            def __init__(self, *, text="", visible=True):
+                self.text, self.visible = text, visible
+            @property
+            def last(self): return self
+            @property
+            def first(self): return self
+            def count(self): return 1
+            def nth(self, _index): return self
+            def inner_text(self): return self.text
+            def is_visible(self): return self.visible
+            def is_enabled(self): return True
+            def is_editable(self): return True
+            def get_attribute(self, _name): return None
+        class Page:
+            def locator(self, selector):
+                if selector == ChatDom.assistant_selector:
+                    return Element(text="Thinking\n\nConnection interrupted. Waiting for the complete answer")
+                if selector in ChatDom.composer_selectors:
+                    return Element()
+                if selector == ChatDom.stop_selector:
+                    return Element()
+                return Element(visible=False)
+
+        self.assertFalse(ChatDom(Page()).streaming())
+
     def test_visible_editable_composer_outweighs_generic_login_labels(self):
         class Element:
             def __init__(self, *, visible=False, editable=False, text=""):

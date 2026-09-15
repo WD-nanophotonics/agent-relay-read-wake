@@ -15,6 +15,7 @@ from .model import (Request, atomic_json, chat_project_id_from_url,
                     conversation_id_from_url, project_landing_url, runtime_root,
                     same_chat_project)
 from .owner import OwnerBusy, OwnerLease, OwnerRecord, process_alive, read_owner, terminate_orphan_browser
+from .protocol import is_chat_ui_error
 from .storage import ledger_reply, merge_conversation_ledger, request_events, save_response_cursor
 
 
@@ -683,6 +684,23 @@ class ChatDom:
         return {"message_count": snapshot.get("message_count"), **messages[-1]}
 
     def streaming(self) -> bool:
+        # ChatGPT can leave a visible stop control behind after a transport
+        # interruption even though the composer is already usable again.  That
+        # UI error card is terminal, not an indefinitely active generation.
+        # Prefer the final assistant state plus an actionable composer over the
+        # stale control so the next queued request is not blocked forever.
+        try:
+            nodes = self.page.locator(self.assistant_selector)
+            if nodes.count():
+                latest = nodes.nth(nodes.count() - 1)
+                text = latest.inner_text().strip()
+                if is_chat_ui_error(text):
+                    composer = self.composer()
+                    if (composer.is_visible() and composer.is_enabled()
+                            and composer.is_editable()):
+                        return False
+        except Exception:
+            pass
         try:
             if self.page.locator(self.stop_selector).count() and self.page.locator(self.stop_selector).first.is_visible(): return True
         except Exception:

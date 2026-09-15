@@ -367,6 +367,25 @@ class CliPreflightTests(unittest.TestCase):
         self.assertEqual(reconnecting["reconnect_attempt"], 1)
         self.assertEqual(reconnecting["maximum_reconnect_attempts"], 1)
 
+    def test_repeated_rate_limit_does_not_restart_the_cooldown_forever(self):
+        busy = ChatRateLimited(
+            "temporary usage limit",
+            {"rate_limited": True, "streaming": False, "ready": False},
+        )
+        with tempfile.TemporaryDirectory() as value, patch(
+            "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}
+        ), patch("chat_courier.cli._run_session_once", side_effect=busy) as run_once, patch(
+            "chat_courier.cli.time.sleep"
+        ) as sleep:
+            root = self.request_directory(Path(value))
+            request = load_request(root)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = _run_after_queue(request, None)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(run_once.call_count, 2)
+        sleep.assert_called_once_with(600)
+
     def test_non_streaming_composer_failure_does_not_wait_or_reconnect(self):
         with tempfile.TemporaryDirectory() as value, patch(
             "chat_courier.model._load_registry", return_value={"P": "https://chatgpt.com/c/x"}

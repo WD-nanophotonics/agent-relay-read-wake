@@ -476,6 +476,7 @@ def _run_after_queue(request, previous: dict | None, *, resend_once: bool = Fals
     try:
         if load_response_capture(request) is None:
             contention_reconnects = 0
+            rate_limit_reconnects = 0
             while True:
                 try:
                     outcome = _run_session_once(request, submitted, request.workflow_window_seconds,
@@ -488,7 +489,15 @@ def _run_after_queue(request, previous: dict | None, *, resend_once: bool = Fals
                             not rate_limited
                             and contention_reconnects >= CHAT_CONTENTION_RECONNECT_ATTEMPTS)):
                         raise
-                    if not rate_limited:
+                    if rate_limited:
+                        # The advertised rate-limit policy is one ten-minute
+                        # cooldown followed by one reconnect, not an unbounded
+                        # series of fresh cooldowns whenever the page flips
+                        # between a limit card and another non-ready state.
+                        if rate_limit_reconnects >= 1:
+                            raise
+                        rate_limit_reconnects += 1
+                    else:
                         contention_reconnects += 1
                     _wait_for_shared_chat(
                         request, exc,
