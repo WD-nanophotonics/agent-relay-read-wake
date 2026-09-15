@@ -1556,8 +1556,17 @@ def _regenerate_interrupted_response_once(request) -> int:
     events = request_events(request)
     if any(item.get("event") == "response_ui_retry_click_intent" for item in events):
         return 1
-    if any(item.get("event") == "interrupted_reply_recovery_submission_unconfirmed"
-           for item in events):
+    last_unconfirmed = max(
+        (index for index, item in enumerate(events)
+         if item.get("event") == "interrupted_reply_recovery_submission_unconfirmed"),
+        default=-1,
+    )
+    last_recovery_submitted = max(
+        (index for index, item in enumerate(events)
+         if item.get("event") == "interrupted_reply_recovery_resend_submitted"),
+        default=-1,
+    )
+    if last_unconfirmed > last_recovery_submitted:
         try:
             diagnostic = json.loads(
                 (request.directory / "submission_diagnostic.json").read_text(encoding="utf-8")
